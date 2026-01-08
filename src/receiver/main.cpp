@@ -11,7 +11,7 @@
 static OledUi ui;
 static LoRaLink loraLink;
 static StatusLed statusLed;
-static WBusSimple wbus;
+static WBusSimple wbus(Serial2);
 
 static uint16_t gSeq = 1;
 static proto::StatusPayload gStatus{};

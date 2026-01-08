@@ -3,6 +3,14 @@
 #include "project_config.h"
 #include "wbus_simple.h"
 
+// ESP32-C3 doesn't have Serial2, create custom HardwareSerial instance
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+HardwareSerial WBusSerial(1); // Use UART1 on ESP32-C3
+#define WBUS_SERIAL WBusSerial
+#else
+#define WBUS_SERIAL Serial2
+#endif
+
 namespace {
 
 static uint8_t makeHeader(uint8_t src, uint8_t dst) {
@@ -38,12 +46,12 @@ static void sendFrame(uint8_t cmdWithAckBit, const uint8_t* data, uint8_t dataLe
   csum ^= cmdWithAckBit;
   for (uint8_t i = 0; i < dataLen; i++) csum ^= data[i];
 
-  Serial2.write(header);
-  Serial2.write(length);
-  Serial2.write(cmdWithAckBit);
-  if (dataLen > 0) Serial2.write(data, dataLen);
-  Serial2.write(csum);
-  Serial2.flush();
+  WBUS_SERIAL.write(header);
+  WBUS_SERIAL.write(length);
+  WBUS_SERIAL.write(cmdWithAckBit);
+  if (dataLen > 0) WBUS_SERIAL.write(data, dataLen);
+  WBUS_SERIAL.write(csum);
+  WBUS_SERIAL.flush();
 }
 
 enum class SimState : uint8_t {
@@ -148,7 +156,7 @@ struct SimModel {
 };
 
 static SimModel gSim;
-static WBusSimple gRxParser;
+static WBusSimple gRxParser(WBUS_SERIAL);
 
 static void respondOperatingState() {
   const uint8_t data[2] = {0x07, gSim.opStateCode()};
@@ -475,6 +483,9 @@ void setup() {
   Serial.printf("UART pins: RX=%d TX=%d\n", WBUS_RX_PIN, WBUS_TX_PIN);
   Serial.printf("WBUS addrs: controller=0x%X heater=0x%X\n", WBUS_ADDR_CONTROLLER, WBUS_ADDR_HEATER);
   Serial.printf("Headers: ctrl->heat=0x%02X heat->ctrl=0x%02X\n", controllerToHeaterHeader(), heaterToControllerHeader());
+
+  // Initialize W-BUS serial port
+  WBUS_SERIAL.begin(2400, SERIAL_8E1, WBUS_RX_PIN, WBUS_TX_PIN);
 
   // Use the existing parser for validated frame capture.
   gRxParser.begin();

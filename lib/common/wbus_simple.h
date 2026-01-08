@@ -98,6 +98,9 @@ struct WBusPacket {
 
 class WBusSimple {
  public:
+  // Constructor that accepts custom serial port (no default for cross-platform compatibility)
+  explicit WBusSimple(HardwareSerial& serial) : port(serial) {}
+
   bool begin();
 
   // Call frequently from loop() to parse incoming serial bytes.
@@ -139,7 +142,7 @@ class WBusSimple {
   static constexpr uint8_t kCommandRetries = 3;
 
  private:
-  HardwareSerial& port = Serial2;
+  HardwareSerial& port;
   bool didBreak = false;
 
   // Active command tracking for keep-alive/renewal
