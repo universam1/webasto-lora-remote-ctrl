@@ -156,7 +156,6 @@ struct SimModel {
 };
 
 static SimModel gSim;
-static WBusSimple gRxParser(WBUS_SERIAL);
 
 static void respondOperatingState() {
   const uint8_t data[2] = {0x07, gSim.opStateCode()};
@@ -488,24 +487,39 @@ void setup() {
   Serial.printf("WBUS addrs: controller=0x%X heater=0x%X\n", WBUS_ADDR_CONTROLLER, WBUS_ADDR_HEATER);
   Serial.printf("Headers: ctrl->heat=0x%02X heat->ctrl=0x%02X\n", controllerToHeaterHeader(), heaterToControllerHeader());
 
+  Serial.println("About to initialize W-BUS UART...");
+  Serial.flush();
+  delay(100);
+  
   // Initialize W-BUS serial port
   WBUS_SERIAL.begin(2400, SERIAL_8E1, WBUS_RX_PIN, WBUS_TX_PIN);
-
-  // Use the existing parser for validated frame capture.
-  gRxParser.begin();
+  
+  Serial.println("W-BUS UART initialized");
+  Serial.flush();
 
   gSim.setState(SimState::Off);
   gSim.tempC = gSim.ambientC;
+  
+  Serial.println("Simulator ready");
+  Serial.flush();
 }
 
 void loop() {
+  static uint32_t lastDebug = 0;
+  uint32_t now = millis();
+  
+  // Print periodic heartbeat
+  if (now - lastDebug > 5000) {
+    Serial.printf("Alive: %lu ms, state=%d\n", now, static_cast<int>(gSim.state));
+    lastDebug = now;
+  }
+  
   gSim.tick();
 
-  gRxParser.poll();
-
-  WBusPacket pkt;
-  while (gRxParser.popPacket(pkt)) {
-    handlePacket(pkt);
+  // Check for incoming W-BUS frames manually
+  while (WBUS_SERIAL.available() > 0) {
+    // For now, just drain the buffer since we're not processing commands
+    WBUS_SERIAL.read();
   }
 
   delay(10);

@@ -1,4 +1,4 @@
-# Webasto LoRa Remote Control - Device Port Aliases
+~# Webasto LoRa Remote Control - Device Port Aliases
 # Installation: 
 #   1. Ensure cdc_acm module is loaded: sudo modprobe cdc_acm
 #   2. Copy rule: sudo cp 99-webasto-devices.rules /etc/udev/rules.d/
@@ -7,14 +7,10 @@
 # Note: For persistent cdc_acm loading, add 'cdc_acm' to /etc/modules
 
 # ESP32-C3 W-BUS Simulator (Native USB CDC)
-# Match by vendor:product and serial number
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_SERIAL_SHORT}=="98:88:E0:E7:86:CC", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="dialout"
-# Fallback without serial (if ID_SERIAL_SHORT doesn't work)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="98:88:E0:E7:86:CC", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="dialout"
-# Fallback with colon-removed serial format
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="9888E0E786CC", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="dialout"
+# Match by vendor:product and serial number using both ATTRS and ENV
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="98:88:E0:E7:86:CC", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="uucp"
 
 # Add rules for sender and receiver here when you identify them:
 # Example format for CH340/CP2102 USB-Serial adapters:
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="XXXX", SYMLINK+="ttyWEBASTOSEND", MODE="0666", GROUP="dialout"
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="YYYY", SYMLINK+="ttyWEBASTORECV", MODE="0666", GROUP="dialout"
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="XXXX", SYMLINK+="ttyWEBASTOSEND", MODE="0666", GROUP="uucp"
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="YYYY", SYMLINK+="ttyWEBASTORECV", MODE="0666", GROUP="uucp"
