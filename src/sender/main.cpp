@@ -210,7 +210,9 @@ void loop() {
       uint32_t age = (millis() - gLastStatusRxMs) / 1000;
       ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age " + String(age) + "s");
       ui.setLine(3, formatMeasurements(gLastStatus));
-      ui.setLine(4, String("Op 0x") + String(gLastStatus.lastWbusOpState, HEX) + " RSSI " + String(gLastStatus.lastRssiDbm));
+      ui.setLine(4,
+                 String("Op 0x") + String(gLastStatus.lastWbusOpState, HEX) + " RSSI " + String(gLastStatus.lastRssiDbm) +
+                     " SNR " + String(gLastStatus.lastSnrDb));
     }
 
     if (gAwaitingCmdSeq != 0) {
