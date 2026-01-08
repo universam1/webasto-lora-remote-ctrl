@@ -89,7 +89,15 @@ Exact timing is hardware dependent. If you see unreliable first‑packet behavio
 ## Command/response conventions used here
 
 Many interactions use a command byte and optionally a “sub‑index” (one data byte) to select a page of data.
+### Commands
 
+| Command | Name | Data | Notes |
+|---------|------|------|-------|
+| `0x10` | Stop | none | Stops heating/ventilation |
+| `0x21` | Parking Heater | 1 byte (minutes) | Start heating for N minutes |
+| `0x22` | Ventilation | 1 byte (minutes) | Start ventilation (fan only) for N minutes |
+| `0x44` | Keep-alive | 2-3 bytes | Maintains active session |
+| `0x50` | Status request | 1+ bytes (index or 0x30+IDs) | Query status pages |
 ### Operating state
 
 We use:
@@ -120,10 +128,38 @@ Implementation in this repo:
 
 Some setups (and at least one public Arduino implementation) poll a small set of fixed pages:
 
-- `0x50 0x05`: temperature/voltage and other measurements
-- `0x50 0x0F`: several component/power values (often scaled)
-- `0x50 0x02`, `0x50 0x03`: bitflag pages
-- `0x50 0x06`: counters/timers (varies)
+| Page | Contents | Response size |
+|------|----------|---------------|
+| `0x03` | State flags bitfield (heat_request, vent_request, combustion_fan, glowplug, fuel_pump, nozzle_heating) | 1 byte |
+| `0x04` | Actuator percentages (glowplug %, fuel pump Hz, combustion fan %) | 8 bytes |
+| `0x05` | Temperature, voltage, flame, heater power | ~8 bytes |
+| `0x06` | Counters (working hours, operating hours, start counter) | 8 bytes |
+| `0x07` | Operating state | 4 bytes |
+| `0x0F` | Component values (glowplug, pump, fan - scaled) | 3 bytes |
+
+In this repo we have readers for:
+- `readStateFlags()` → page 0x03
+- `readActuators()` → page 0x04
+- `readCounters()` → page 0x06
+- `readOperatingState()` → page 0x07
+
+## Keep-alive and auto-renewal
+
+Per the esphome-webasto pattern, heaters may require periodic keep-alive messages to maintain an active heating/ventilation session.
+
+The `WBusSimple` class now tracks:
+- `activeCmd`: The currently running command (0x21=heat, 0x22=vent, 0=none)
+- `activeUntilMs`: When the session expires
+- `lastKeepAliveMs`: When the last keep-alive was sent
+
+Helper methods:
+- `needsKeepAlive(nowMs)`: Returns true every 10 seconds while a command is active
+- `needsRenewal(nowMs)`: Returns true when <30 seconds remain (should re-issue the start command)
+- `setActiveCommand(cmd, minutes)` / `clearActiveCommand()`: Manage state
+
+## Retry logic
+
+Commands now retry up to 3 times (configurable via `kCommandRetries`) with ACK verification, matching the esphome-webasto pattern.
 
 In this repo we added a **fallback**: if the multi‑status TLV snapshot doesn’t arrive/parse during the poll window, the receiver tries these pages and **logs the raw bytes** to Serial.
 

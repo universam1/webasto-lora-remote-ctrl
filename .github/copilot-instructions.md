@@ -78,6 +78,26 @@ These are configured in `include/project_config.h` and used by `lib/common/lora_
 
 Headers vary by address pair; do not assume fixed constants.
 
+### Supported commands
+| Command | Name | Notes |
+|---------|------|-------|
+| `0x10` | Stop | Stops heating/ventilation |
+| `0x21` | Parking Heater | Start heating for N minutes |
+| `0x22` | Ventilation | Start ventilation (fan only) for N minutes |
+| `0x44` | Keep-alive | Maintains active session |
+| `0x50` | Status request | Query status pages |
+
+### Status page readers
+- `readStateFlags()` → page 0x03 (heat_request, vent_request, combustion_fan, glowplug, fuel_pump, nozzle_heating)
+- `readActuators()` → page 0x04 (glowplug %, fuel pump Hz, combustion fan %)
+- `readCounters()` → page 0x06 (working hours, operating hours, start counter)
+- `readOperatingState()` → page 0x07 (operating state code)
+
+### Keep-alive and auto-renewal
+- Commands retry up to 3 times with ACK verification
+- `needsKeepAlive(nowMs)`: Returns true every 10s while command is active
+- `needsRenewal(nowMs)`: Returns true when <30s remain (re-issue start command)
+
 ### Status polling styles supported
 - Multi-status TLV snapshot (H4jen-style): `0x50` with subcommand `0x30` and a list of IDs.
 - “Simple status pages” (Moki38-style): `0x50` with index pages `0x05`, `0x0F`, `0x02`, `0x03`, `0x06`.

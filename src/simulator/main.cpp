@@ -207,6 +207,81 @@ static void respondSimpleFlags(uint8_t idx) {
   sendFrame(static_cast<uint8_t>(0x50 | 0x80), data, sizeof(data));
 }
 
+// Status page 0x03: State flags bitfield (per esphome-webasto)
+static void respondPage03() {
+  // Layout: [idx=0x03][flags]
+  // Flags: 0x01=heat_request, 0x02=vent_request, 0x10=combustion_fan,
+  //        0x20=glowplug, 0x40=fuel_pump, 0x80=nozzle_heating
+  uint8_t flags = 0x00;
+  if (gSim.state == SimState::Running) {
+    flags |= 0x01; // heat_request
+    flags |= 0x10; // combustion_fan
+    flags |= 0x40; // fuel_pump
+  }
+  if (gSim.state == SimState::Starting) {
+    flags |= 0x20; // glowplug
+    flags |= 0x10; // combustion_fan
+  }
+
+  const uint8_t data[2] = {0x03, flags};
+  sendFrame(static_cast<uint8_t>(0x50 | 0x80), data, sizeof(data));
+}
+
+// Status page 0x04: Actuator percentages (8 bytes per esphome-webasto)
+static void respondPage04() {
+  // Layout: [idx=0x04][8 bytes: unknown x4, glowplug%, fuel_pump, combustion_fan%, unknown]
+  uint8_t data[1 + 8] = {0};
+  data[0] = 0x04;
+
+  // Bytes 1-4: unknown, keep 0
+  // Byte 5 (idx 4 in esphome): glowplug% (0-100)
+  const uint8_t glowPct = (gSim.state == SimState::Starting) ? 80 : 0;
+  data[5] = glowPct;
+
+  // Byte 6 (idx 5): fuel pump Hz * 100 / 2 (encoding: raw * 2 / 100 = Hz)
+  const uint8_t fuelRaw = (gSim.state == SimState::Running) ? 150 : 0; // ~3 Hz
+  data[6] = fuelRaw;
+
+  // Byte 7 (idx 6): combustion fan % (0-200)
+  const uint8_t fanPct = (gSim.state == SimState::Running) ? 100 :
+                         (gSim.state == SimState::Starting) ? 50 :
+                         (gSim.state == SimState::Cooling) ? 40 : 0;
+  data[7] = fanPct;
+
+  // Byte 8: unknown
+  data[8] = 0;
+
+  sendFrame(static_cast<uint8_t>(0x50 | 0x80), data, sizeof(data));
+}
+
+// Status page 0x06: Counters (8 bytes per esphome-webasto)
+static void respondPage06() {
+  // Layout: [idx=0x06][8 bytes]
+  // byte0,1=working_hours, byte2=working_minutes
+  // byte3,4=operating_hours, byte5=operating_minutes
+  // byte6,7=start_counter
+  uint8_t data[1 + 8] = {0};
+  data[0] = 0x06;
+
+  // Fake counter values
+  const uint16_t workingHrs = 123;
+  const uint8_t workingMins = 45;
+  const uint16_t operatingHrs = 456;
+  const uint8_t operatingMins = 30;
+  const uint16_t startCount = 789;
+
+  data[1] = static_cast<uint8_t>((workingHrs >> 8) & 0xFF);
+  data[2] = static_cast<uint8_t>(workingHrs & 0xFF);
+  data[3] = workingMins;
+  data[4] = static_cast<uint8_t>((operatingHrs >> 8) & 0xFF);
+  data[5] = static_cast<uint8_t>(operatingHrs & 0xFF);
+  data[6] = operatingMins;
+  data[7] = static_cast<uint8_t>((startCount >> 8) & 0xFF);
+  data[8] = static_cast<uint8_t>(startCount & 0xFF);
+
+  sendFrame(static_cast<uint8_t>(0x50 | 0x80), data, sizeof(data));
+}
+
 static void respondMultiStatus(const WBusPacket& req) {
   // Request payload: [0]=0x50, [1]=0x30, then IDs, then checksum.
   if (req.payloadLen < 4) return;
@@ -321,13 +396,25 @@ static void handlePacket(const WBusPacket& pkt) {
   const uint8_t cmd = pkt.payload[0];
 
   switch (cmd) {
-    case 0x21: { // start with minutes
+    case 0x21: { // parking heater start with minutes
       if (pkt.payloadLen < 3) break;
       gSim.requestedMinutes = pkt.payload[1];
       gSim.setState(SimState::Starting);
-      // Optional ACK
-      sendFrame(static_cast<uint8_t>(0x21 | 0x80), nullptr, 0);
-      Serial.printf("WBUS SIM: start %u min\n", gSim.requestedMinutes);
+      // ACK echoes the minutes
+      const uint8_t ack[1] = {gSim.requestedMinutes};
+      sendFrame(static_cast<uint8_t>(0x21 | 0x80), ack, sizeof(ack));
+      Serial.printf("WBUS SIM: heat %u min\n", gSim.requestedMinutes);
+      break;
+    }
+
+    case 0x22: { // ventilation start with minutes
+      if (pkt.payloadLen < 3) break;
+      gSim.requestedMinutes = pkt.payload[1];
+      gSim.setState(SimState::Starting);
+      // ACK echoes the minutes
+      const uint8_t ack[1] = {gSim.requestedMinutes};
+      sendFrame(static_cast<uint8_t>(0x22 | 0x80), ack, sizeof(ack));
+      Serial.printf("WBUS SIM: vent %u min\n", gSim.requestedMinutes);
       break;
     }
 
@@ -355,7 +442,13 @@ static void handlePacket(const WBusPacket& pkt) {
         respondSimple05();
       } else if (idxOrSub == 0x0F) {
         respondSimple0F();
-      } else if (idxOrSub == 0x02 || idxOrSub == 0x03 || idxOrSub == 0x06) {
+      } else if (idxOrSub == 0x03) {
+        respondPage03();
+      } else if (idxOrSub == 0x04) {
+        respondPage04();
+      } else if (idxOrSub == 0x06) {
+        respondPage06();
+      } else if (idxOrSub == 0x02) {
         respondSimpleFlags(idxOrSub);
       } else {
         // Unknown page; reply with just cmdAck+idx.

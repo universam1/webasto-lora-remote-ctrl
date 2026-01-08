@@ -364,11 +364,56 @@ bool WBusSimple::readPacket(WBusPacket& out, uint32_t timeoutMs) {
 }
 
 bool WBusSimple::startParkingHeater(uint8_t minutes) {
-  return sendCommand(0x21, &minutes, 1);
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x21, &minutes, 1)) continue;
+
+    // Wait for ACK (cmd | 0x80)
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 3) continue;
+    if (pkt.payload[0] != (0x21 | 0x80)) continue;
+    if (pkt.payload[1] != minutes) continue;
+
+    setActiveCommand(0x21, minutes);
+    return true;
+  }
+  return false;
+}
+
+bool WBusSimple::startVentilation(uint8_t minutes) {
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x22, &minutes, 1)) continue;
+
+    // Wait for ACK (cmd | 0x80)
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 3) continue;
+    if (pkt.payload[0] != (0x22 | 0x80)) continue;
+    if (pkt.payload[1] != minutes) continue;
+
+    setActiveCommand(0x22, minutes);
+    return true;
+  }
+  return false;
 }
 
 bool WBusSimple::stop() {
-  return sendCommand(0x10, nullptr, 0);
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x10, nullptr, 0)) continue;
+
+    // Wait for ACK (cmd | 0x80)
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 2) continue;
+    if (pkt.payload[0] != (0x10 | 0x80)) continue;
+
+    clearActiveCommand();
+    return true;
+  }
+  return false;
 }
 
 bool WBusSimple::readOperatingState(uint8_t& opState) {
@@ -408,8 +453,138 @@ bool WBusSimple::requestStatusMulti(const uint8_t* ids, uint8_t idsLen) {
 }
 
 bool WBusSimple::sendKeepAlive() {
-  // Common keep-alive pattern seen in the wild is command 0x44 with 2 bytes.
-  // This is intentionally optional; not all heaters require it.
-  const uint8_t data[2] = {0x2A, 0x00};
-  return sendCommand(0x44, data, 2);
+  // Per esphome-webasto: 0x44 with [activeCmd, 0x00] checks current command
+  // If no active command, use generic keep-alive pattern
+  uint8_t data[3];
+  uint8_t dataLen;
+
+  if (activeCmd != 0) {
+    data[0] = activeCmd;
+    data[1] = 0x00;
+    data[2] = 0x00;
+    dataLen = 3;
+  } else {
+    data[0] = 0x2A;
+    data[1] = 0x00;
+    dataLen = 2;
+  }
+
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x44, data, dataLen)) continue;
+
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 2) continue;
+    if (pkt.payload[0] != (0x44 | 0x80)) continue;
+
+    lastKeepAliveMs = millis();
+    return true;
+  }
+  return false;
+}
+
+// Status page 0x03: State flags (bitfield)
+bool WBusSimple::readStateFlags(WBusStateFlags& out) {
+  uint8_t index = 0x03;
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x50, &index, 1)) continue;
+
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 4) continue;
+    if ((pkt.payload[0] & 0x7F) != 0x50) continue;
+    if (pkt.payload[1] != 0x03) continue;
+
+    uint8_t flags = pkt.payload[2];
+    out.heatRequest = flags & 0x01;
+    out.ventRequest = flags & 0x02;
+    // bits 2,3 unknown
+    out.combustionFan = flags & 0x10;
+    out.glowPlug = flags & 0x20;
+    out.fuelPump = flags & 0x40;
+    out.nozzleHeating = flags & 0x80;
+    out.valid = true;
+    return true;
+  }
+  return false;
+}
+
+// Status page 0x04: Actuator percentages (8 bytes)
+bool WBusSimple::readActuators(WBusActuators& out) {
+  uint8_t index = 0x04;
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x50, &index, 1)) continue;
+
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 11) continue; // 2 + 8 data + 1 checksum
+    if ((pkt.payload[0] & 0x7F) != 0x50) continue;
+    if (pkt.payload[1] != 0x04) continue;
+
+    // Per esphome-webasto: byte4=glowplug%, byte5=fuel_pump*2/100 Hz, byte6=combustion_fan%
+    // Indices are: payload[2..9] = 8 data bytes
+    out.glowPlugPct = static_cast<float>(pkt.payload[6]);          // 0-100%
+    out.fuelPumpHz = static_cast<float>(pkt.payload[7]) * 2.0f / 100.0f; // 0-5 Hz
+    out.combustionFanPct = static_cast<float>(pkt.payload[8]);     // 0-200%
+    out.valid = true;
+    return true;
+  }
+  return false;
+}
+
+// Status page 0x06: Counters (8 bytes)
+bool WBusSimple::readCounters(WBusCounters& out) {
+  uint8_t index = 0x06;
+  for (uint8_t retry = 0; retry < kCommandRetries; retry++) {
+    if (!sendCommand(0x50, &index, 1)) continue;
+
+    WBusPacket pkt;
+    if (!readPacket(pkt, 200)) continue;
+    if (pkt.header != wbusRxHeader()) continue;
+    if (pkt.payloadLen < 11) continue; // 2 + 8 data + 1 checksum
+    if ((pkt.payload[0] & 0x7F) != 0x50) continue;
+    if (pkt.payload[1] != 0x06) continue;
+
+    // Per esphome-webasto layout:
+    // byte0,1 = working hours, byte2 = working minutes
+    // byte3,4 = operating hours, byte5 = operating minutes
+    // byte6,7 = start counter
+    out.workingHours = 256.0f * static_cast<float>(pkt.payload[2]) +
+                       static_cast<float>(pkt.payload[3]) +
+                       static_cast<float>(pkt.payload[4]) / 60.0f;
+    out.operatingHours = 256.0f * static_cast<float>(pkt.payload[5]) +
+                         static_cast<float>(pkt.payload[6]) +
+                         static_cast<float>(pkt.payload[7]) / 60.0f;
+    out.startCounter = static_cast<uint16_t>(pkt.payload[8]) * 256 +
+                       static_cast<uint16_t>(pkt.payload[9]);
+    out.valid = true;
+    return true;
+  }
+  return false;
+}
+
+// Keep-alive tracking
+void WBusSimple::setActiveCommand(uint8_t cmd, uint8_t minutes) {
+  activeCmd = cmd;
+  activeUntilMs = millis() + static_cast<uint32_t>(minutes) * 60000UL;
+  lastKeepAliveMs = millis();
+}
+
+void WBusSimple::clearActiveCommand() {
+  activeCmd = 0;
+  activeUntilMs = 0;
+}
+
+bool WBusSimple::needsKeepAlive(uint32_t nowMs) const {
+  if (activeCmd == 0) return false;
+  return (nowMs - lastKeepAliveMs) >= kKeepAlivePeriodMs;
+}
+
+bool WBusSimple::needsRenewal(uint32_t nowMs) const {
+  if (activeCmd == 0) return false;
+  if (nowMs >= activeUntilMs) return true; // Already expired
+  return (activeUntilMs - nowMs) < kRenewalThresholdMs;
 }
