@@ -1,0 +1,177 @@
+#include <Arduino.h>
+
+#include "project_config.h"
+#include "lora_link.h"
+#include "oled_ui.h"
+#include "protocol.h"
+
+static OledUi ui;
+static LoRaLink loraLink;
+
+static uint16_t gSeq = 1;
+static uint8_t gLastMinutes = DEFAULT_RUN_MINUTES;
+static proto::StatusPayload gLastStatus{};
+static uint32_t gLastStatusRxMs = 0;
+
+static String readLineNonBlocking() {
+  static String buf;
+  while (Serial.available()) {
+    char c = static_cast<char>(Serial.read());
+    if (c == '\r') continue;
+    if (c == '\n') {
+      String line = buf;
+      buf = "";
+      line.trim();
+      return line;
+    }
+    buf += c;
+    if (buf.length() > 128) buf.remove(0, buf.length() - 128);
+  }
+  return "";
+}
+
+static bool sendCommand(proto::CommandKind kind, uint8_t minutes) {
+  proto::Packet pkt{};
+  pkt.h.magic = proto::kMagic;
+  pkt.h.version = proto::kVersion;
+  pkt.h.type = proto::MsgType::Command;
+  pkt.h.src = LORA_NODE_SENDER;
+  pkt.h.dst = LORA_NODE_RECEIVER;
+  pkt.h.seq = gSeq++;
+  pkt.p.cmd.kind = kind;
+  pkt.p.cmd.minutes = minutes;
+  pkt.crc = proto::calcCrc(pkt);
+
+  return loraLink.send(pkt);
+}
+
+static const char* heaterStateToStr(proto::HeaterState s) {
+  switch (s) {
+    case proto::HeaterState::Off:
+      return "OFF";
+    case proto::HeaterState::Running:
+      return "RUN";
+    case proto::HeaterState::Error:
+      return "ERR";
+    default:
+      return "UNK";
+  }
+}
+
+static String formatMeasurements(const proto::StatusPayload& st) {
+  // Keep it short to fit 128px width.
+  String out;
+  if (st.temperatureC != INT16_MIN) {
+    out += String("T ") + String(st.temperatureC) + "C";
+  } else {
+    out += "T --";
+  }
+
+  if (st.voltage_mV != 0) {
+    out += String(" V ") + String(st.voltage_mV);
+  } else {
+    out += " V --";
+  }
+
+  if (st.power != 0) {
+    out += String(" P ") + String(st.power);
+  }
+
+  return out;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  ui.begin();
+  ui.setLine(0, "Webasto LoRa Sender");
+  ui.setLine(1, "Init LoRa...");
+  ui.render();
+
+  bool ok = loraLink.begin();
+  ui.setLine(1, ok ? "LoRa OK" : "LoRa FAIL");
+  ui.setLine(2, String("Freq ") + String((uint32_t)LORA_FREQUENCY_HZ));
+  ui.setLine(3, "Cmd via Serial:");
+  ui.setLine(4, "start|stop|run N");
+  ui.render();
+
+  Serial.println("Sender ready. Commands: start | stop | run <minutes>");
+}
+
+void loop() {
+  // Receive status from receiver.
+  {
+    proto::Packet pkt{};
+    int rssi = 0;
+    float snr = 0;
+    if (loraLink.recv(pkt, rssi, snr)) {
+      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER) {
+        gLastStatus = pkt.p.status;
+        gLastStatus.lastRssiDbm = (int8_t)rssi;
+        gLastStatus.lastSnrDb = (int8_t)snr;
+        gLastStatusRxMs = millis();
+      }
+    }
+  }
+
+  // Handle serial UI.
+  String line = readLineNonBlocking();
+  if (line.length() > 0) {
+    if (line.equalsIgnoreCase("stop")) {
+      if (sendCommand(proto::CommandKind::Stop, 0)) {
+        Serial.println("Sent STOP");
+      } else {
+        Serial.println("Failed to send STOP");
+      }
+    } else if (line.equalsIgnoreCase("start")) {
+      if (sendCommand(proto::CommandKind::Start, gLastMinutes)) {
+        Serial.printf("Sent START (%u min)\n", gLastMinutes);
+      } else {
+        Serial.println("Failed to send START");
+      }
+    } else if (line.startsWith("run") || line.startsWith("RUN")) {
+      int space = line.indexOf(' ');
+      if (space < 0) {
+        Serial.println("Usage: run <minutes>");
+      } else {
+        int minutes = line.substring(space + 1).toInt();
+        if (minutes <= 0 || minutes > 255) {
+          Serial.println("Minutes must be 1..255");
+        } else {
+          gLastMinutes = static_cast<uint8_t>(minutes);
+          if (sendCommand(proto::CommandKind::RunMinutes, gLastMinutes)) {
+            Serial.printf("Sent RUN (%u min)\n", gLastMinutes);
+          } else {
+            Serial.println("Failed to send RUN");
+          }
+        }
+      }
+    } else {
+      Serial.println("Unknown command. Use: start | stop | run <minutes>");
+    }
+  }
+
+  // OLED refresh
+  static uint32_t lastUiMs = 0;
+  if (millis() - lastUiMs > 250) {
+    lastUiMs = millis();
+
+    ui.setLine(0, "Webasto LoRa Sender");
+    ui.setLine(1, String("Preset: ") + String(gLastMinutes) + " min");
+
+    if (gLastStatusRxMs == 0) {
+      ui.setLine(2, "Status: (none)");
+      ui.setLine(3, "");
+      ui.setLine(4, "");
+    } else {
+      uint32_t age = (millis() - gLastStatusRxMs) / 1000;
+      ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age " + String(age) + "s");
+      ui.setLine(3, formatMeasurements(gLastStatus));
+      ui.setLine(4, String("Op 0x") + String(gLastStatus.lastWbusOpState, HEX) + " RSSI " + String(gLastStatus.lastRssiDbm));
+    }
+
+    ui.setLine(5, "Serial: start/stop/run");
+    ui.render();
+  }
+}
