@@ -9,6 +9,8 @@ class OledUi {
 
   void begin();
 
+  void setPowerSave(bool enable);
+
   void setLine(uint8_t idx, const String& text);
   void render();
 

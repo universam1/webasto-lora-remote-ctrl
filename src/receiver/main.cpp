@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_sleep.h>
 
 #include "project_config.h"
 #include "lora_link.h"
@@ -16,6 +17,9 @@ static uint32_t gLastCmdMs = 0;
 static uint32_t gLastPollMs = 0;
 static uint8_t gLastRunMinutes = DEFAULT_RUN_MINUTES;
 
+// Persist across deep sleep to deduplicate sender retries.
+RTC_DATA_ATTR static uint16_t gLastProcessedCmdSeq = 0;
+
 static void sendStatus(int rssiDbm, float snrDb) {
   proto::Packet pkt{};
   pkt.h.magic = proto::kMagic;
@@ -31,6 +35,31 @@ static void sendStatus(int rssiDbm, float snrDb) {
   pkt.crc = proto::calcCrc(pkt);
 
   loraLink.send(pkt);
+}
+
+static void enterDeepSleepMs(uint32_t sleepMs) {
+  // Turn radio off as best-effort.
+  LoRa.sleep();
+
+  // Turn OLED off while sleeping.
+  ui.setPowerSave(true);
+
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleepMs) * 1000ULL);
+  esp_deep_sleep_start();
+}
+
+static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& lastCmdSnr, proto::Packet& outPkt) {
+  LoRa.receive();
+  const uint32_t start = millis();
+  while (millis() - start < windowMs) {
+    if (loraLink.recv(outPkt, lastCmdRssi, lastCmdSnr)) {
+      if (outPkt.h.type == proto::MsgType::Command && outPkt.h.dst == LORA_NODE_RECEIVER) {
+        return true;
+      }
+    }
+    delay(5);
+  }
+  return false;
 }
 
 static proto::HeaterState mapOpState(uint8_t opState) {
@@ -157,16 +186,60 @@ void setup() {
   gStatus.temperatureC = INT16_MIN;
   gStatus.voltage_mV = 0;
   gStatus.power = 0;
+
+  gStatus.lastCmdSeq = gLastProcessedCmdSeq;
 }
 
 void loop() {
-  // Receive commands
+  // If heater is not running, we can save power by waking periodically,
+  // opening a short RX window, and then deep sleeping again.
+  const bool heaterRunning = (gStatus.state == proto::HeaterState::Running);
+
   int lastCmdRssi = 0;
   float lastCmdSnr = 0;
+  proto::Packet pkt{};
+
+  if (!heaterRunning) {
+    // OLED off while idle.
+    ui.setPowerSave(true);
+
+    // Short command listen window.
+    bool gotCmd = tryReceiveCommandWindow(static_cast<uint32_t>(RX_IDLE_LISTEN_WINDOW_MS), lastCmdRssi, lastCmdSnr, pkt);
+    if (gotCmd) {
+      // fall through to command handling below
+    } else {
+      // Quick check: if the heater is actually running (started externally), stay awake.
+      uint8_t op = 0;
+      if (wbus.readOperatingState(op)) {
+        gStatus.lastWbusOpState = op;
+        gStatus.state = mapOpState(op);
+      }
+
+      if (gStatus.state != proto::HeaterState::Running) {
+        // Sleep until next scan.
+        enterDeepSleepMs(static_cast<uint32_t>(RX_IDLE_SLEEP_MS));
+      }
+      // else: heater is running; keep OLED on and continue in running mode.
+    }
+  } else {
+    // Running mode: keep OLED on continuously.
+    ui.setPowerSave(false);
+  }
+
+  // Receive commands (continuous in running mode, or immediately after a wake window)
   {
-    proto::Packet pkt{};
-    if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
-      if (pkt.h.type == proto::MsgType::Command && pkt.h.dst == LORA_NODE_RECEIVER) {
+    if (heaterRunning) {
+      if (!loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
+        pkt = proto::Packet{};
+      }
+    }
+
+    if (pkt.h.type == proto::MsgType::Command && pkt.h.dst == LORA_NODE_RECEIVER) {
+      // Deduplicate sender retries.
+      if (pkt.h.seq == gLastProcessedCmdSeq) {
+        gStatus.lastCmdSeq = gLastProcessedCmdSeq;
+        sendStatus(lastCmdRssi, lastCmdSnr);
+      } else {
         bool ok = true;
 
         switch (pkt.p.cmd.kind) {
@@ -203,7 +276,10 @@ void loop() {
           gStatus.state = proto::HeaterState::Error;
         }
 
-        // Send immediate status update.
+        gLastProcessedCmdSeq = pkt.h.seq;
+        gStatus.lastCmdSeq = gLastProcessedCmdSeq;
+
+        // Send immediate status update as ACK.
         sendStatus(lastCmdRssi, lastCmdSnr);
       }
     }

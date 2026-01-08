@@ -13,6 +13,10 @@ void OledUi::begin() {
   u8g2.setFontPosTop();
 }
 
+void OledUi::setPowerSave(bool enable) {
+  u8g2.setPowerSave(enable ? 1 : 0);
+}
+
 void OledUi::setLine(uint8_t idx, const String& text) {
   if (idx >= 6) return;
   lines[idx] = text;

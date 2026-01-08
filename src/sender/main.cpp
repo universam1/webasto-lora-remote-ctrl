@@ -12,6 +12,7 @@ static uint16_t gSeq = 1;
 static uint8_t gLastMinutes = DEFAULT_RUN_MINUTES;
 static proto::StatusPayload gLastStatus{};
 static uint32_t gLastStatusRxMs = 0;
+static uint16_t gAwaitingCmdSeq = 0;
 
 static String readLineNonBlocking() {
   static String buf;
@@ -30,19 +31,60 @@ static String readLineNonBlocking() {
   return "";
 }
 
-static bool sendCommand(proto::CommandKind kind, uint8_t minutes) {
+static proto::Packet makeCommandPacket(proto::CommandKind kind, uint8_t minutes, uint16_t seq) {
   proto::Packet pkt{};
   pkt.h.magic = proto::kMagic;
   pkt.h.version = proto::kVersion;
   pkt.h.type = proto::MsgType::Command;
   pkt.h.src = LORA_NODE_SENDER;
   pkt.h.dst = LORA_NODE_RECEIVER;
-  pkt.h.seq = gSeq++;
+  pkt.h.seq = seq;
   pkt.p.cmd.kind = kind;
   pkt.p.cmd.minutes = minutes;
   pkt.crc = proto::calcCrc(pkt);
 
-  return loraLink.send(pkt);
+  return pkt;
+}
+
+static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
+  const uint16_t cmdSeq = gSeq++;
+  const proto::Packet cmd = makeCommandPacket(kind, minutes, cmdSeq);
+  gAwaitingCmdSeq = cmdSeq;
+
+  uint32_t start = millis();
+  uint32_t nextSend = 0;
+  bool anySendOk = false;
+
+  while (millis() - start < static_cast<uint32_t>(SENDER_CMD_ACK_TIMEOUT_MS)) {
+    const uint32_t now = millis();
+    if (now >= nextSend) {
+      anySendOk |= loraLink.send(cmd);
+      nextSend = now + static_cast<uint32_t>(SENDER_CMD_RETRY_INTERVAL_MS);
+    }
+
+    // Pump RX while we wait.
+    proto::Packet pkt{};
+    int rssi = 0;
+    float snr = 0;
+    if (loraLink.recv(pkt, rssi, snr)) {
+      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER) {
+        gLastStatus = pkt.p.status;
+        gLastStatus.lastRssiDbm = (int8_t)rssi;
+        gLastStatus.lastSnrDb = (int8_t)snr;
+        gLastStatusRxMs = millis();
+
+        if (gLastStatus.lastCmdSeq == cmdSeq) {
+          gAwaitingCmdSeq = 0;
+          return true;
+        }
+      }
+    }
+
+    delay(10);
+  }
+
+  // Timed out.
+  return anySendOk;
 }
 
 static const char* heaterStateToStr(proto::HeaterState s) {
@@ -119,14 +161,14 @@ void loop() {
   String line = readLineNonBlocking();
   if (line.length() > 0) {
     if (line.equalsIgnoreCase("stop")) {
-      if (sendCommand(proto::CommandKind::Stop, 0)) {
-        Serial.println("Sent STOP");
+      if (sendCommandWithAck(proto::CommandKind::Stop, 0)) {
+        Serial.println("Sent STOP (ACKed)");
       } else {
         Serial.println("Failed to send STOP");
       }
     } else if (line.equalsIgnoreCase("start")) {
-      if (sendCommand(proto::CommandKind::Start, gLastMinutes)) {
-        Serial.printf("Sent START (%u min)\n", gLastMinutes);
+      if (sendCommandWithAck(proto::CommandKind::Start, gLastMinutes)) {
+        Serial.printf("Sent START (%u min, ACKed)\n", gLastMinutes);
       } else {
         Serial.println("Failed to send START");
       }
@@ -140,8 +182,8 @@ void loop() {
           Serial.println("Minutes must be 1..255");
         } else {
           gLastMinutes = static_cast<uint8_t>(minutes);
-          if (sendCommand(proto::CommandKind::RunMinutes, gLastMinutes)) {
-            Serial.printf("Sent RUN (%u min)\n", gLastMinutes);
+          if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes)) {
+            Serial.printf("Sent RUN (%u min, ACKed)\n", gLastMinutes);
           } else {
             Serial.println("Failed to send RUN");
           }
@@ -171,7 +213,11 @@ void loop() {
       ui.setLine(4, String("Op 0x") + String(gLastStatus.lastWbusOpState, HEX) + " RSSI " + String(gLastStatus.lastRssiDbm));
     }
 
-    ui.setLine(5, "Serial: start/stop/run");
+    if (gAwaitingCmdSeq != 0) {
+      ui.setLine(5, String("Waiting ACK ") + String(gAwaitingCmdSeq));
+    } else {
+      ui.setLine(5, "Serial: start/stop/run");
+    }
     ui.render();
   }
 }

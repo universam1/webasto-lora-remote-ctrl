@@ -5,7 +5,7 @@
 namespace proto {
 
 static constexpr uint32_t kMagic = 0x574C5231; // 'WLR1'
-static constexpr uint8_t kVersion = 2;
+static constexpr uint8_t kVersion = 3;
 
 enum class MsgType : uint8_t {
   Command = 1,
@@ -48,6 +48,10 @@ struct StatusPayload {
   int8_t lastSnrDb;
   uint8_t lastWbusOpState; // raw 0x50 idx 0x07 byte0 (if known)
   uint8_t lastErrorCode;   // best-effort (0 if unknown)
+
+  // Correlates receiver status updates to the most recently processed command.
+  // The sender can use this as an ACK for retry loops.
+  uint16_t lastCmdSeq;
 
   // Decoded measurements from multi-status responses (best-effort).
   // If unknown, temperatureC is INT16_MIN and others are 0.

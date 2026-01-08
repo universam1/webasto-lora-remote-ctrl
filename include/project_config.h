@@ -80,6 +80,32 @@
 #define DEFAULT_RUN_MINUTES 30
 #endif
 
+// -------------------------
+// Low-power / latency tuning
+// -------------------------
+// With a sleeping receiver, the sender may need to retry a command until the receiver
+// wakes up and responds with a status update that includes lastCmdSeq.
+
+// Receiver: how long to keep LoRa in RX after waking (ms)
+#ifndef RX_IDLE_LISTEN_WINDOW_MS
+#define RX_IDLE_LISTEN_WINDOW_MS 400
+#endif
+
+// Receiver: deep-sleep interval when heater is OFF/idle (ms)
+#ifndef RX_IDLE_SLEEP_MS
+#define RX_IDLE_SLEEP_MS 4000
+#endif
+
+// Sender: how long to retry a command waiting for correlated status ACK (ms)
+#ifndef SENDER_CMD_ACK_TIMEOUT_MS
+#define SENDER_CMD_ACK_TIMEOUT_MS 10000
+#endif
+
+// Sender: resend interval while waiting for ACK (ms)
+#ifndef SENDER_CMD_RETRY_INTERVAL_MS
+#define SENDER_CMD_RETRY_INTERVAL_MS 1000
+#endif
+
 // W-BUS UART (ESP32 Serial2 default pins are board-specific; we define explicit pins)
 // NOTE: W-BUS is a single-wire 12V K-line style bus. You MUST use a proper interface
 // (e.g., NXP MC33660/MC33290 or a transistor level-shifter/open-collector circuit).
