@@ -17,6 +17,10 @@ static uint32_t gLastCmdMs = 0;
 static uint32_t gLastPollMs = 0;
 static uint8_t gLastRunMinutes = DEFAULT_RUN_MINUTES;
 
+// Cache whether the connected W-BUS device supports the 0x50/0x30 multi-status TLV snapshot.
+static bool gTlvSupportKnown = false;
+static bool gTlvSupported = false;
+
 // Persist across deep sleep to deduplicate sender retries.
 RTC_DATA_ATTR static uint16_t gLastProcessedCmdSeq = 0;
 
@@ -86,6 +90,38 @@ static bool waitForStatusIndex(WBusSimple& wbus, uint8_t index, WBusPacket& out,
     if (out.payload[1] != index) continue;
     return true;
   }
+  return false;
+}
+
+static bool tryPollMultiStatusOnce(WBusSimple& wbus, proto::StatusPayload& outStatus) {
+  static const uint8_t kIds[] = {
+      0x01, 0x03, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0C, 0x0E, 0x0F, 0x10, 0x11, 0x13,
+      0x1E, 0x1F, 0x24, 0x27, 0x29, 0x2A, 0x2C, 0x2D, 0x32, 0x34, 0x3D, 0x52, 0x57,
+      0x5F, 0x78, 0x89,
+  };
+
+  if (!wbus.requestStatusMulti(kIds, sizeof(kIds))) return false;
+
+  // Wait briefly for a matching response.
+  WBusPacket pkt;
+  uint32_t deadline = millis() + 250;
+  while (millis() < deadline) {
+    if (!wbus.readPacket(pkt, 250)) break;
+    if (pkt.payloadLen < 4) continue;
+    if ((pkt.payload[0] & 0x7F) != 0x50) continue;
+    if ((pkt.payload[0] & 0x80) == 0) continue;
+    if (pkt.payload[1] != 0x30) continue;
+
+    WBusStatus st;
+    if (WBusSimple::tryParseStatusTlv(pkt, st) && st.valid) {
+      outStatus.temperatureC = st.temperatureC;
+      outStatus.voltage_mV = st.voltage_mV;
+      outStatus.power = st.power;
+      return true;
+    }
+    break;
+  }
+
   return false;
 }
 
@@ -188,6 +224,16 @@ void setup() {
   gStatus.power = 0;
 
   gStatus.lastCmdSeq = gLastProcessedCmdSeq;
+
+  // Probe once whether the connected W-BUS device supports the multi-status TLV snapshot.
+  // If it doesn't, avoid re-trying it on every poll cycle and go straight to the fallback pages.
+  {
+    proto::StatusPayload scratch = gStatus;
+    gTlvSupported = tryPollMultiStatusOnce(wbus, scratch);
+    gTlvSupportKnown = true;
+    Serial.print("WBUS TLV multi-status support: ");
+    Serial.println(gTlvSupported ? "yes" : "no");
+  }
 }
 
 void loop() {
@@ -297,32 +343,12 @@ void loop() {
 
     // Also request a multi-status snapshot and decode fields from the response.
     {
-      // Mirrors the common multi-read ID set found in public Webasto tooling (e.g. H4jen/webasto).
-      static const uint8_t kIds[] = {
-          0x01, 0x03, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0C, 0x0E, 0x0F, 0x10, 0x11, 0x13,
-          0x1E, 0x1F, 0x24, 0x27, 0x29, 0x2A, 0x2C, 0x2D, 0x32, 0x34, 0x3D, 0x52, 0x57,
-          0x5F, 0x78, 0x89,
-      };
       bool gotTlv = false;
-      if (wbus.requestStatusMulti(kIds, sizeof(kIds))) {
-        // Wait briefly for a matching response.
-        WBusPacket pkt;
-        uint32_t deadline = millis() + 250;
-        while (millis() < deadline) {
-          if (!wbus.readPacket(pkt, 250)) break;
-          if (pkt.payloadLen < 4) continue;
-          if ((pkt.payload[0] & 0x7F) != 0x50) continue;
-          if ((pkt.payload[0] & 0x80) == 0) continue;
-          if (pkt.payload[1] != 0x30) continue;
-
-          WBusStatus st;
-          if (WBusSimple::tryParseStatusTlv(pkt, st) && st.valid) {
-            gStatus.temperatureC = st.temperatureC;
-            gStatus.voltage_mV = st.voltage_mV;
-            gStatus.power = st.power;
-            gotTlv = true;
-          }
-          break;
+      if (!gTlvSupportKnown || gTlvSupported) {
+        gotTlv = tryPollMultiStatusOnce(wbus, gStatus);
+        if (!gTlvSupportKnown) {
+          gTlvSupported = gotTlv;
+          gTlvSupportKnown = true;
         }
       }
 
