@@ -41,6 +41,11 @@
 #define OLED_RST 16
 #endif
 
+// Status LED (onboard blue LED on TTGO LoRa32-OLED V1.0)
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 25
+#endif
+
 // -------------------------
 // LoRa radio configuration
 // -------------------------
@@ -67,13 +72,31 @@
 #endif
 
 // -------------------------
-// Application configuration
+// W-BUS (Webasto) configuration
 // -------------------------
 // Addressing based on webasto_wbus.txt (Thermo Top V example):
 // - Diagnosis/controller address = 0xF, Heater address = 0x4
 // Header byte = (src<<4) | dst
 #define WBUS_ADDR_CONTROLLER 0xF
 #define WBUS_ADDR_HEATER 0x4
+
+// UART pins (configurable for simulator vs receiver)
+#ifndef WBUS_TX_PIN
+#define WBUS_TX_PIN 17
+#endif
+#ifndef WBUS_RX_PIN
+#define WBUS_RX_PIN 34
+#endif
+#ifndef WBUS_EN_PIN
+#define WBUS_EN_PIN -1
+#endif
+#ifndef WBUS_SEND_BREAK
+#define WBUS_SEND_BREAK 1
+#endif
+
+// -------------------------
+// Application configuration
+// -------------------------
 
 // Default duration used by "start" if no prior "run <minutes>" command has been sent.
 #ifndef DEFAULT_RUN_MINUTES
@@ -104,28 +127,6 @@
 // Sender: resend interval while waiting for ACK (ms)
 #ifndef SENDER_CMD_RETRY_INTERVAL_MS
 #define SENDER_CMD_RETRY_INTERVAL_MS 1000
-#endif
-
-// W-BUS UART (ESP32 Serial2 default pins are board-specific; we define explicit pins)
-// NOTE: W-BUS is a single-wire 12V K-line style bus. You MUST use a proper interface
-// (e.g., NXP MC33660/MC33290 or a transistor level-shifter/open-collector circuit).
-// These pins are the ESP32 side of that interface.
-#ifndef WBUS_TX_PIN
-#define WBUS_TX_PIN 17
-#endif
-#ifndef WBUS_RX_PIN
-#define WBUS_RX_PIN 34
-#endif
-
-// Optional: if your interface needs a GPIO to enable TX (transceiver enable).
-#ifndef WBUS_EN_PIN
-#define WBUS_EN_PIN -1
-#endif
-
-// Should we emit a BREAK low pulse before the first command?
-// webasto_wbus.txt notes many heaters require a ~50ms break.
-#ifndef WBUS_SEND_BREAK
-#define WBUS_SEND_BREAK 1
 #endif
 
 // LoRa addressing (simple point-to-point)

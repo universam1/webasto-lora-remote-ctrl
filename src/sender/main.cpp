@@ -4,9 +4,11 @@
 #include "lora_link.h"
 #include "oled_ui.h"
 #include "protocol.h"
+#include "status_led.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
+static StatusLed statusLed;
 
 static uint16_t gSeq = 1;
 static uint8_t gLastMinutes = DEFAULT_RUN_MINUTES;
@@ -51,6 +53,8 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
   const proto::Packet cmd = makeCommandPacket(kind, minutes, cmdSeq);
   gAwaitingCmdSeq = cmdSeq;
 
+  statusLed.setBlink(200);  // Fast blink while sending command
+
   uint32_t start = millis();
   uint32_t nextSend = 0;
   bool anySendOk = false;
@@ -75,6 +79,7 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
 
         if (gLastStatus.lastCmdSeq == cmdSeq) {
           gAwaitingCmdSeq = 0;
+          statusLed.setOff();  // Turn off LED on successful ACK
           return true;
         }
       }
@@ -84,6 +89,7 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
   }
 
   // Timed out.
+  statusLed.setOff();  // Turn off LED on timeout
   return anySendOk;
 }
 
@@ -125,6 +131,8 @@ static String formatMeasurements(const proto::StatusPayload& st) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  statusLed.begin();
 
   ui.begin();
   ui.setLine(0, "Webasto LoRa Sender");
@@ -193,6 +201,9 @@ void loop() {
       Serial.println("Unknown command. Use: start | stop | run <minutes>");
     }
   }
+
+  // Update LED
+  statusLed.update();
 
   // OLED refresh
   static uint32_t lastUiMs = 0;

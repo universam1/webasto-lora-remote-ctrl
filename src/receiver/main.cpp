@@ -5,10 +5,12 @@
 #include "lora_link.h"
 #include "oled_ui.h"
 #include "protocol.h"
+#include "status_led.h"
 #include "wbus_simple.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
+static StatusLed statusLed;
 static WBusSimple wbus;
 
 static uint16_t gSeq = 1;
@@ -205,6 +207,8 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  statusLed.begin();
+
   ui.begin();
   ui.setLine(0, "Webasto LoRa Receiver");
   ui.setLine(1, "Init LoRa...");
@@ -252,6 +256,13 @@ void loop() {
   // If heater is not running, we can save power by waking periodically,
   // opening a short RX window, and then deep sleeping again.
   const bool heaterRunning = (gStatus.state == proto::HeaterState::Running);
+
+  // Update LED status
+  if (heaterRunning) {
+    statusLed.setOn();  // Solid on while heater is running
+  } else {
+    statusLed.setBlink(1000);  // Slow blink (500ms on/off) while idle
+  }
 
   int lastCmdRssi = 0;
   float lastCmdSnr = 0;
@@ -408,6 +419,9 @@ void loop() {
     // send status every poll
     sendStatus(0, 0);
   }
+
+  // Update LED blinking
+  statusLed.update();
 
   // OLED refresh
   static uint32_t lastUiMs = 0;
