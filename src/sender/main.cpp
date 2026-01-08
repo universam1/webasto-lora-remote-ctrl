@@ -132,6 +132,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  Serial.println("\n\n==================================");
+  Serial.println("  WEBASTO LORA SENDER");
+  Serial.println("  Device ID: SENDER");
+  Serial.println("==================================");
+
   statusLed.begin();
 
   ui.begin();

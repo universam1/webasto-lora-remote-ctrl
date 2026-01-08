@@ -479,6 +479,10 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  Serial.println("\n\n==================================");
+  Serial.println("  WEBASTO W-BUS SIMULATOR");
+  Serial.println("  Device ID: SIMULATOR");
+  Serial.println("==================================");
   Serial.println("WBUS simulator (ThermoTop-like) starting...");
   Serial.printf("UART pins: RX=%d TX=%d\n", WBUS_RX_PIN, WBUS_TX_PIN);
   Serial.printf("WBUS addrs: controller=0x%X heater=0x%X\n", WBUS_ADDR_CONTROLLER, WBUS_ADDR_HEATER);
