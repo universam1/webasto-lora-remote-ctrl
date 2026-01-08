@@ -17,12 +17,15 @@ static uint32_t gLastCmdMs = 0;
 static uint32_t gLastPollMs = 0;
 static uint8_t gLastRunMinutes = DEFAULT_RUN_MINUTES;
 
-// Cache whether the connected W-BUS device supports the 0x50/0x30 multi-status TLV snapshot.
-static bool gTlvSupportKnown = false;
-static bool gTlvSupported = false;
-
 // Persist across deep sleep to deduplicate sender retries.
 RTC_DATA_ATTR static uint16_t gLastProcessedCmdSeq = 0;
+
+// Persist across deep sleep so we don't re-probe TLV support on every wake.
+// 0 = unknown, 1 = not supported, 2 = supported
+RTC_DATA_ATTR static uint8_t gTlvSupportCache = 0;
+
+static bool gTlvSupportKnown = false;
+static bool gTlvSupported = false;
 
 static void sendStatus(int rssiDbm, float snrDb) {
   proto::Packet pkt{};
@@ -228,9 +231,18 @@ void setup() {
   // Probe once whether the connected W-BUS device supports the multi-status TLV snapshot.
   // If it doesn't, avoid re-trying it on every poll cycle and go straight to the fallback pages.
   {
-    proto::StatusPayload scratch = gStatus;
-    gTlvSupported = tryPollMultiStatusOnce(wbus, scratch);
-    gTlvSupportKnown = true;
+    if (gTlvSupportCache == 2) {
+      gTlvSupported = true;
+      gTlvSupportKnown = true;
+    } else if (gTlvSupportCache == 1) {
+      gTlvSupported = false;
+      gTlvSupportKnown = true;
+    } else {
+      proto::StatusPayload scratch = gStatus;
+      gTlvSupported = tryPollMultiStatusOnce(wbus, scratch);
+      gTlvSupportKnown = true;
+      gTlvSupportCache = gTlvSupported ? 2 : 1;
+    }
     Serial.print("WBUS TLV multi-status support: ");
     Serial.println(gTlvSupported ? "yes" : "no");
   }
@@ -254,18 +266,9 @@ void loop() {
     if (gotCmd) {
       // fall through to command handling below
     } else {
-      // Quick check: if the heater is actually running (started externally), stay awake.
-      uint8_t op = 0;
-      if (wbus.readOperatingState(op)) {
-        gStatus.lastWbusOpState = op;
-        gStatus.state = mapOpState(op);
-      }
-
-      if (gStatus.state != proto::HeaterState::Running) {
-        // Sleep until next scan.
-        enterDeepSleepMs(static_cast<uint32_t>(RX_IDLE_SLEEP_MS));
-      }
-      // else: heater is running; keep OLED on and continue in running mode.
+      // No command received: go back to sleep.
+      // We intentionally avoid polling W-BUS here to minimize wake-time power draw.
+      enterDeepSleepMs(static_cast<uint32_t>(RX_IDLE_SLEEP_MS));
     }
   } else {
     // Running mode: keep OLED on continuously.
@@ -344,12 +347,8 @@ void loop() {
     // Also request a multi-status snapshot and decode fields from the response.
     {
       bool gotTlv = false;
-      if (!gTlvSupportKnown || gTlvSupported) {
+      if (gTlvSupportCache == 2) {
         gotTlv = tryPollMultiStatusOnce(wbus, gStatus);
-        if (!gTlvSupportKnown) {
-          gTlvSupported = gotTlv;
-          gTlvSupportKnown = true;
-        }
       }
 
       // Fallback: poll a few “simple status pages” (as seen in Moki38) and log them.
