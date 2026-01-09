@@ -104,6 +104,25 @@
 #endif
 
 // -------------------------
+// Battery monitoring (TTGO LoRa32-OLED V1.0)
+// -------------------------
+// TTGO LoRa32 V1.0 exposes the battery via a resistor divider to ADC GPIO35.
+// The divider is typically ~2:1, so the voltage at the pin is ~VBAT/2.
+// You can tweak VBAT_DIVIDER_RATIO and VBAT_CALIBRATION to calibrate readings.
+#ifndef VBAT_ADC_PIN
+#define VBAT_ADC_PIN 35
+#endif
+#ifndef VBAT_DIVIDER_RATIO
+#define VBAT_DIVIDER_RATIO 2.0f
+#endif
+#ifndef VBAT_CALIBRATION
+#define VBAT_CALIBRATION 1.0f
+#endif
+#ifndef VBAT_UPDATE_INTERVAL_MS
+#define VBAT_UPDATE_INTERVAL_MS 1000
+#endif
+
+// -------------------------
 // Low-power / latency tuning
 // -------------------------
 // With a sleeping receiver, the sender may need to retry a command until the receiver

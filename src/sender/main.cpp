@@ -16,6 +16,10 @@ static proto::StatusPayload gLastStatus{};
 static uint32_t gLastStatusRxMs = 0;
 static uint16_t gAwaitingCmdSeq = 0;
 
+// Battery monitoring state
+static float gBattV = 0.0f;
+static uint32_t gLastBattUpdateMs = 0;
+
 static String readLineNonBlocking() {
   static String buf;
   while (Serial.available()) {
@@ -152,6 +156,13 @@ void setup() {
   ui.render();
 
   Serial.println("Sender ready. Commands: start | stop | run <minutes>");
+
+  // Initialize battery ADC (GPIO35 on TTGO LoRa32 v1.0)
+  // Use 11dB attenuation for better range.
+#ifdef ARDUINO_ARCH_ESP32
+  adcAttachPin(VBAT_ADC_PIN);
+  analogSetPinAttenuation(VBAT_ADC_PIN, ADC_11db);
+#endif
 }
 
 void loop() {
@@ -210,13 +221,27 @@ void loop() {
   // Update LED
   statusLed.update();
 
+  // Update battery voltage periodically
+  if (millis() - gLastBattUpdateMs > VBAT_UPDATE_INTERVAL_MS) {
+    gLastBattUpdateMs = millis();
+    int raw = analogRead(VBAT_ADC_PIN);
+    float vpin = (float)raw / 4095.0f * 3.3f;  // approx. ADC scale to volts
+    float vbat = vpin * VBAT_DIVIDER_RATIO * VBAT_CALIBRATION;
+    // Simple low-pass filter to smooth jitter
+    if (gBattV <= 0.01f) {
+      gBattV = vbat;
+    } else {
+      gBattV = (gBattV * 0.8f) + (vbat * 0.2f);
+    }
+  }
+
   // OLED refresh
   static uint32_t lastUiMs = 0;
   if (millis() - lastUiMs > 250) {
     lastUiMs = millis();
 
     ui.setLine(0, "Webasto LoRa Sender");
-    ui.setLine(1, String("Preset: ") + String(gLastMinutes) + " min");
+    ui.setLine(1, String("Preset: ") + String(gLastMinutes) + " min  Bat " + String(gBattV, 2) + "V");
 
     if (gLastStatusRxMs == 0) {
       ui.setLine(2, "Status: (none)");
