@@ -23,7 +23,7 @@ HardwareSerial wbusSerial(2);
 #define WBUS_TX_PIN 17
 #endif
 #ifndef WBUS_RX_PIN
-#define WBUS_RX_PIN 25  // Default for receiver (GPIO25), simulator uses GPIO16
+#define WBUS_RX_PIN 25  // Default for receiver (GPIO25), simulator overrides to GPIO4
 #endif
 
 void setup() {
@@ -54,6 +54,15 @@ void setup() {
 }
 
 void loop() {
+  static uint32_t lastDebug = 0;
+  uint32_t now = millis();
+  
+  // Periodic debug output
+  if (now - lastDebug > 2000) {
+    Serial.printf("[DEBUG] UART available: %d\n", wbusSerial.available());
+    lastDebug = now;
+  }
+  
   // Check for data from USB serial (commands from user)
   if (Serial.available()) {
     char cmd = Serial.read();
