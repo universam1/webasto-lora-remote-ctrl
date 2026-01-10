@@ -179,6 +179,7 @@ void setup()
   Serial.println("==================================");
 
   statusLed.begin();
+  statusLed.setOff();  // Start with LED off, will toggle on packet activity
 
   ui.begin();
   ui.setLine(0, "Webasto LoRa Sender");

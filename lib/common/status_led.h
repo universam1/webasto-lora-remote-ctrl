@@ -43,7 +43,13 @@ class StatusLed {
   // Toggle LED immediately (pulse/blink indicator)
   // This creates a brief pulse regardless of current mode
   void toggle() {
-    digitalWrite(ledPin, digitalRead(ledPin) == HIGH ? LOW : HIGH);
+    uint32_t now = millis();
+    // Only allow toggling if we're not in a pulse window
+    if (now - lastPulseMs > 100) {  // 100ms minimum between pulses
+      digitalWrite(ledPin, digitalRead(ledPin) == HIGH ? LOW : HIGH);
+      lastPulseMs = now;
+      pulseActive = true;
+    }
   }
 
   // Set LED to blink with given period (ms on + ms off)
@@ -57,9 +63,27 @@ class StatusLed {
 
   // Call frequently from loop() to update blinking
   void update() {
+    uint32_t now = millis();
+    
+    // If we're in a pulse, wait until it's done before resuming normal mode
+    if (pulseActive && (now - lastPulseMs) > 50) {  // 50ms pulse duration
+      pulseActive = false;
+      // Re-apply the current mode
+      if (currentMode == Mode::On) {
+        digitalWrite(ledPin, HIGH);
+      } else if (currentMode == Mode::Off) {
+        digitalWrite(ledPin, LOW);
+      } else if (currentMode == Mode::Blink) {
+        // Resume blinking from where we left off
+        isBlinkOn = !isBlinkOn;
+        digitalWrite(ledPin, isBlinkOn ? HIGH : LOW);
+        lastToggleMs = now;
+      }
+      return;
+    }
+    
     if (currentMode != Mode::Blink) return;
 
-    uint32_t now = millis();
     if (now - lastToggleMs >= blinkPeriodMs) {
       isBlinkOn = !isBlinkOn;
       digitalWrite(ledPin, isBlinkOn ? HIGH : LOW);
@@ -75,4 +99,6 @@ class StatusLed {
   uint16_t blinkPeriodMs = 500;
   uint32_t lastToggleMs = 0;
   bool isBlinkOn = false;
+  uint32_t lastPulseMs = 0;
+  bool pulseActive = false;
 };

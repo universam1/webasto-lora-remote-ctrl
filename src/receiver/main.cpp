@@ -44,6 +44,7 @@ static void sendStatus(int rssiDbm, float snrDb) {
   pkt.crc = proto::calcCrc(pkt);
 
   loraLink.send(pkt);
+  statusLed.toggle();  // Flash LED on TX
 }
 
 static void enterDeepSleepMs(uint32_t sleepMs) {
@@ -68,6 +69,7 @@ static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& 
   const uint32_t start = millis();
   while (millis() - start < windowMs) {
     if (loraLink.recv(outPkt, lastCmdRssi, lastCmdSnr)) {
+      statusLed.toggle();  // Flash LED on RX
       Serial.printf("[LORA-RX] Got packet: magic=0x%04X ver=%d type=%d src=%d dst=%d seq=%d\n",
                     outPkt.h.magic, outPkt.h.version, static_cast<int>(outPkt.h.type),
                     outPkt.h.src, outPkt.h.dst, outPkt.h.seq);
@@ -274,11 +276,15 @@ void loop() {
   // opening a short RX window, and then deep sleeping again.
   const bool heaterRunning = (gStatus.state == proto::HeaterState::Running);
 
-  // Update LED status
-  if (heaterRunning) {
-    statusLed.setOn();  // Solid on while heater is running
-  } else {
-    statusLed.setBlink(1000);  // Slow blink (500ms on/off) while idle
+  // Update LED status only when heater state changes
+  static bool lastHeaterRunning = false;
+  if (heaterRunning != lastHeaterRunning) {
+    lastHeaterRunning = heaterRunning;
+    if (heaterRunning) {
+      statusLed.setOn();  // Solid on while heater is running
+    } else {
+      statusLed.setBlink(1000);  // Slow blink while idle
+    }
   }
 
   int lastCmdRssi = 0;
@@ -304,7 +310,9 @@ void loop() {
   }
   
   // Receive LoRa packet in test/debug mode
-  loraLink.recv(pkt, lastCmdRssi, lastCmdSnr);
+  if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
+    statusLed.toggle();  // Flash LED on RX
+  }
   
   // Don't return early - process commands below!
 #else
@@ -336,7 +344,9 @@ void loop() {
     // Only call recv here if we're in running mode (heater on)
     // In idle mode with sleep enabled, recv was already done in tryReceiveCommandWindow
     if (heaterRunning) {
-      if (!loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
+      if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
+        statusLed.toggle();  // Flash LED on RX
+      } else {
         pkt = proto::Packet{};
       }
     }
