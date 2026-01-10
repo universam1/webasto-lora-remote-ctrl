@@ -97,6 +97,9 @@ static bool waitForStatusIndex(WBusSimple& wbus, uint8_t index, WBusPacket& out,
   uint32_t deadline = millis() + timeoutMs;
   while (millis() < deadline) {
     if (!wbus.readPacket(out, timeoutMs)) return false;
+    Serial.printf("[WBUS_RX] hdr=0x%02X len=%u payload[0]=0x%02X payload[1]=0x%02X\n", 
+                  out.header, out.payloadLen, out.payloadLen > 0 ? out.payload[0] : 0xFF, 
+                  out.payloadLen > 1 ? out.payload[1] : 0xFF);
     if (out.payloadLen < 3) continue;
     // Response payload begins with cmd|0x80 (typically 0xD0 for cmd 0x50 responses).
     if ((out.payload[0] & 0x7F) != 0x50) continue;

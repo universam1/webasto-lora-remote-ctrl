@@ -50,6 +50,8 @@ static void sendFrame(uint8_t cmdWithAckBit, const uint8_t* data, uint8_t dataLe
   if (dataLen > 0) WBUS_SERIAL.write(data, dataLen);
   WBUS_SERIAL.write(csum);
   WBUS_SERIAL.flush();
+  
+  Serial.printf("WBUS TX: hdr=0x%02X len=%u cmd=0x%02X dataLen=%u csum=0x%02X\n", header, length, cmdWithAckBit, dataLen, csum);
 }
 
 enum class SimState : uint8_t {
@@ -408,7 +410,7 @@ static void handlePacket(const WBusPacket& pkt) {
       // ACK echoes the minutes
       const uint8_t ack[1] = {gSim.requestedMinutes};
       sendFrame(static_cast<uint8_t>(0x21 | 0x80), ack, sizeof(ack));
-      Serial.printf("WBUS SIM: heat %u min\n", gSim.requestedMinutes);
+      Serial.printf("WBUS SIM: START HEATING for %u minutes\n", gSim.requestedMinutes);
       break;
     }
 
@@ -426,7 +428,7 @@ static void handlePacket(const WBusPacket& pkt) {
     case 0x10: { // stop
       if (gSim.state != SimState::Off) gSim.setState(SimState::Cooling);
       sendFrame(static_cast<uint8_t>(0x10 | 0x80), nullptr, 0);
-      Serial.println("WBUS SIM: stop");
+      Serial.println("WBUS SIM: STOP HEATING");
       break;
     }
 
@@ -437,8 +439,10 @@ static void handlePacket(const WBusPacket& pkt) {
 
     case 0x50: { // status requests
       // Data begins at payload[1].
-      if (pkt.payloadLen < 4) break;
+      // Note: payloadLen includes the checksum byte, so minimum length is 3 (cmd + idx + checksum)
+      if (pkt.payloadLen < 3) break;
       const uint8_t idxOrSub = pkt.payload[1];
+      Serial.printf("WBUS SIM: status request idx=0x%02X\n", idxOrSub);
       if (idxOrSub == 0x30) {
         respondMultiStatus(pkt);
       } else if (idxOrSub == 0x07) {
