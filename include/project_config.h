@@ -43,7 +43,7 @@
 
 // Status LED (onboard blue LED on TTGO LoRa32-OLED V1.0)
 #ifndef STATUS_LED_PIN
-#define STATUS_LED_PIN 25
+#define STATUS_LED_PIN LED_BUILTIN
 #endif
 
 // -------------------------

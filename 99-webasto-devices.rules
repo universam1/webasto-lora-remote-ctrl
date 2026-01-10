@@ -2,12 +2,17 @@
 # Installation: 
 #   sudo cp 99-webasto-devices.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Note: Both simulator and sender use CP2102 with identical serial numbers.
+# They are distinguished by USB port path (ATTR{devpath}).
+# If you move devices to different USB ports, you'll need to update these rules.
 
-# ESP32 W-BUS Simulator (CP2102 USB-to-UART converter)
-# idVendor=10c4, idProduct=ea60, SerialNumber=0001
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="uucp"
+# ESP32 W-BUS Simulator (CP2102 on USB port 1.1)
+# Use: udevadm info -q all -n /dev/ttyUSBx | grep DEVPATH to verify port
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpath}=="1.1", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="uucp"
 
-# Add rules for sender and receiver here when you identify them:
-# Example format for CH340/CP2102 USB-Serial adapters:
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="XXXX", SYMLINK+="ttyWEBASTOSEND", MODE="0666", GROUP="uucp"
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="YYYY", SYMLINK+="ttyWEBASTORECV", MODE="0666", GROUP="uucp"
+# Sender Device (CP2102 on USB port 1.2)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpath}=="1.2", SYMLINK+="ttyWEBASTOSEND", MODE="0666", GROUP="uucp"
+
+# Receiver Device (CP2102 on USB port 1.4)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpath}=="1.4", SYMLINK+="ttyWEBASTORECV", MODE="0666", GROUP="uucp"
