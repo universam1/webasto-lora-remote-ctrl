@@ -47,6 +47,11 @@ static void sendStatus(int rssiDbm, float snrDb) {
 }
 
 static void enterDeepSleepMs(uint32_t sleepMs) {
+#ifdef DISABLE_SLEEP
+  // Sleep disabled for testing - just delay instead
+  Serial.printf("[TEST] Sleep disabled, delaying %lu ms instead\n", sleepMs);
+  delay(sleepMs);
+#else
   // Turn radio off as best-effort.
   LoRa.sleep();
 
@@ -55,6 +60,7 @@ static void enterDeepSleepMs(uint32_t sleepMs) {
 
   esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleepMs) * 1000ULL);
   esp_deep_sleep_start();
+#endif
 }
 
 static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& lastCmdSnr, proto::Packet& outPkt) {
