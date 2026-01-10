@@ -7,6 +7,7 @@
 #include "protocol.h"
 #include "status_led.h"
 #include "wbus_simple.h"
+#include "encryption.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
@@ -241,6 +242,10 @@ void setup() {
 
   ui.setLine(3, String("Freq ") + String((uint32_t)LORA_FREQUENCY_HZ));
   ui.render();
+
+  // Initialize encryption with default PSK
+  crypto::AES128CTR::setKey(proto::kDefaultPSK);
+  Serial.println("[SETUP] AES-128-CTR encryption initialized");
 
   Serial.println("Receiver ready.");
 

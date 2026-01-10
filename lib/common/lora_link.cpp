@@ -38,14 +38,23 @@ bool LoRaLink::send(const proto::Packet& pkt) {
     return false;
   }
 
+  // Create a copy to encrypt
+  proto::Packet encrypted_pkt = pkt;
+  
+  // Encrypt payload union in-place
+  proto::encryptPacket(encrypted_pkt);
+  
+  // Recalculate CRC on encrypted payload
+  encrypted_pkt.crc = proto::calcCrc(encrypted_pkt);
+
   if (!LoRa.beginPacket()) {
     Serial.println("[LORA] send: beginPacket failed!");
     return false;
   }
   
-  size_t written = LoRa.write(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
-  if (written != sizeof(pkt)) {
-    Serial.printf("[LORA] send: write failed, wrote %d of %d bytes\n", (int)written, (int)sizeof(pkt));
+  size_t written = LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt), sizeof(encrypted_pkt));
+  if (written != sizeof(encrypted_pkt)) {
+    Serial.printf("[LORA] send: write failed, wrote %d of %d bytes\n", (int)written, (int)sizeof(encrypted_pkt));
     return false;
   }
   
@@ -59,7 +68,7 @@ bool LoRaLink::send(const proto::Packet& pkt) {
   // Without this, the radio stays in standby and won't receive responses.
   LoRa.receive();
   
-  Serial.printf("[LORA] send: transmitted %d bytes OK\n", (int)sizeof(pkt));
+  Serial.printf("[LORA] send: transmitted %d bytes OK (seq=%d, encrypted)\n", (int)sizeof(encrypted_pkt), pkt.h.seq);
   return true;
 }
 
@@ -97,5 +106,15 @@ bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
   rssi = LoRa.packetRssi();
   snr = LoRa.packetSnr();
 
-  return proto::validate(pkt);
+  // First validate CRC on encrypted packet
+  if (!proto::validate(pkt)) {
+    Serial.println("[LORA] recv: CRC validation failed on encrypted packet");
+    return false;
+  }
+
+  // Decrypt payload in-place
+  proto::decryptPacket(pkt);
+
+  Serial.printf("[LORA] recv: decrypted packet OK (seq=%d, type=%d)\n", pkt.h.seq, static_cast<uint8_t>(pkt.h.type));
+  return true;
 }

@@ -5,6 +5,7 @@
 #include "oled_ui.h"
 #include "protocol.h"
 #include "status_led.h"
+#include "encryption.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
@@ -192,6 +193,10 @@ void setup()
   ui.setLine(3, "Cmd via Serial:");
   ui.setLine(4, "start|stop|run N");
   ui.render();
+
+  // Initialize encryption with default PSK
+  crypto::AES128CTR::setKey(proto::kDefaultPSK);
+  Serial.println("[SETUP] AES-128-CTR encryption initialized");
 
   Serial.println("Sender ready. Commands: start | stop | run <minutes>");
 

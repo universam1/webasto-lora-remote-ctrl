@@ -1,11 +1,20 @@
 #pragma once
 
 #include <Arduino.h>
+#include "encryption.h"
 
 namespace proto {
 
 static constexpr uint32_t kMagic = 0x574C5231; // 'WLR1'
 static constexpr uint8_t kVersion = 3;
+
+// Default pre-shared key for AES-128-CTR encryption
+// CHANGE THIS FOR PRODUCTION: Use a unique key per device pair
+// Key must be exactly 16 bytes
+static constexpr uint8_t kDefaultPSK[16] = {
+  0x57, 0x65, 0x62, 0x61, 0x73, 0x74, 0x6F, 0x4C,  // "WbastoL"
+  0x6F, 0x52, 0x61, 0x32, 0x30, 0x32, 0x36, 0x00   // "oRa2026"
+};
 
 enum class MsgType : uint8_t {
   Command = 1,
@@ -83,6 +92,29 @@ inline bool validate(const Packet& pkt) {
   if (pkt.h.magic != kMagic) return false;
   if (pkt.h.version != kVersion) return false;
   return pkt.crc == calcCrc(pkt);
+}
+
+// Encrypt payload union in-place using AES-128-CTR with implicit nonce
+// Nonce is derived from packet seq + src + dst
+inline void encryptPacket(Packet& pkt) {
+  uint8_t plaintext[32];
+  uint8_t ciphertext[32];
+  memcpy(plaintext, pkt.p.raw, sizeof(plaintext));
+  
+  crypto::AES128CTR::encryptPayload(plaintext, ciphertext, pkt.h.seq, pkt.h.src, pkt.h.dst);
+  
+  memcpy(pkt.p.raw, ciphertext, sizeof(ciphertext));
+}
+
+// Decrypt payload union in-place using AES-128-CTR with implicit nonce
+inline void decryptPacket(Packet& pkt) {
+  uint8_t ciphertext[32];
+  uint8_t plaintext[32];
+  memcpy(ciphertext, pkt.p.raw, sizeof(ciphertext));
+  
+  crypto::AES128CTR::decryptPayload(ciphertext, plaintext, pkt.h.seq, pkt.h.src, pkt.h.dst);
+  
+  memcpy(pkt.p.raw, plaintext, sizeof(plaintext));
 }
 
 } // namespace proto

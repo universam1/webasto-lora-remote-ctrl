@@ -7,8 +7,7 @@ Two TTGO LoRa32 SX1276 OLED boards:
 
 ## What’s implemented
 
-- LoRa P2P link using `sandeepmistry/LoRa`
-- OLED UI using `U8g2` (SSD1306 I2C)
+- LoRa P2P link using `sandeepmistry/LoRa`- **AES-128-CTR encryption** on all LoRa packets (hardware-accelerated via mbedTLS)- OLED UI using `U8g2` (SSD1306 I2C)
 - W‑BUS framing for:
   - `0x21` **Parking heater on** (1 byte: minutes)
   - `0x10` **Shutdown**
@@ -35,6 +34,33 @@ Defaults are set for **TTGO LoRa32-OLED V1.0**:
 - OLED I2C: `SDA=4`, `SCL=15`, `RST=16`
 
 If your board revision differs, adjust `include/project_config.h`.
+
+## Security: AES-128-CTR Encryption
+
+All LoRa packets are encrypted end-to-end using **AES-128-CTR** with hardware acceleration:
+
+### Implementation Details
+- **Algorithm**: AES-128-CTR (stream cipher, no padding overhead)
+- **Hardware Acceleration**: mbedTLS with ESP32's AES engine
+- **Nonce**: Implicit, derived from packet `seq + src + dst` (no transmission overhead)
+- **Packet Size**: 60 bytes total (no increase vs. plaintext due to implicit nonce design)
+- **Pre-Shared Key**: 16-byte PSK stored in firmware (default: `"WbastoLora2026"`)
+
+### Security Properties
+- ✅ **Confidentiality**: Payload encrypted with AES-128-CTR (industry-standard)
+- ✅ **Integrity**: CRC-16 validates transmission (detects bit errors)
+- ✅ **Replay Prevention**: Sequence counter in nonce prevents identical packet replay
+- ⚠️ **Authentication**: Not cryptographically signed (relies on PSK + CRC)
+
+### Changing the Pre-Shared Key
+Edit `lib/common/protocol.h`:
+```cpp
+static constexpr uint8_t kDefaultPSK[16] = {
+  0x57, 0x65, 0x62, 0x61, 0x73, 0x74, 0x6F, 0x4C,  // "WbastoL"
+  0x6F, 0x52, 0x61, 0x32, 0x30, 0x32, 0x36, 0x00   // "oRa2026"
+};
+```
+Both sender and receiver **must use the same PSK** or communication will fail.
 
 ## Build & flash
 
@@ -99,6 +125,7 @@ Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0
 ### ✅ System Configuration
 - **LoRa Frequency**: 433 MHz (TTGO boards are 433 MHz antenna variants)
 - **LoRa Parameters**: BW=125kHz, SF=7, CR=4/5, Sync=0x12
+- **LoRa Security**: AES-128-CTR encryption (hardware-accelerated)
 - **W-BUS Baud**: 2400, 8E1 (even parity)
 - **Hardware**: 2x TTGO LoRa32-OLED V1.0 + 1x ESP32 Dev Module simulator
 - **Wiring**: Receiver TX(GPIO17) ↔ Simulator RX(GPIO16), Receiver RX(GPIO25) ↔ Simulator TX(GPIO17), common GND
@@ -106,14 +133,15 @@ Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0
 ### ✅ Verified Functionality
 
 #### **Sender → Receiver (LoRa Command Link)**
-- Sender transmits 44-byte command packets over LoRa (433 MHz, 6 dBm TX power)
+- Sender transmits 44-byte **encrypted** command packets over LoRa (433 MHz, 6 dBm TX power)
+- Encryption: AES-128-CTR with implicit nonce (no transmission overhead)
 - RSSI: -32 to -33 dBm (excellent signal quality)
 - Commands tested:
   - `RUN <minutes>`: Start heater for N minutes
   - `STOP`: Shutdown heater
   - `START`: Start with default duration
 - ACK mechanism: Receiver echoes `lastCmdSeq` in status, sender confirms receipt
-- **Result**: All commands successfully received and acknowledged
+- **Result**: All commands successfully received, decrypted, and acknowledged
 
 #### **Receiver → Simulator (W-BUS Control)**
 - Receiver forwards LoRa commands to simulator via W-BUS (2400 baud TTL UART)
@@ -149,7 +177,8 @@ Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0
 - **Result**: All status pages respond within 250ms timeout
 
 #### **Receiver → Sender (LoRa Status Link)**
-- Receiver transmits 44-byte status packets every 2 seconds
+- Receiver transmits 44-byte **encrypted** status packets every 2 seconds
+- Encryption: AES-128-CTR with implicit nonce (hardware-accelerated via mbedTLS)
 - Status payload includes:
   - Temperature: 20°C (idle) → 75°C (starting) → temperature readings during operation
   - Voltage: 12400mV → 12150mV (load)
@@ -158,7 +187,7 @@ Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0
   - Flame detection
   - Heater power
   - lastCmdSeq (for ACK correlation)
-- **Result**: Sender continuously receives and displays status updates
+- **Result**: Sender continuously receives, decrypts, and displays status updates
 
 ### ✅ Example Command Sequence
 ```
