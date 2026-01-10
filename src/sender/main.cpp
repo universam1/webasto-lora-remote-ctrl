@@ -20,24 +20,30 @@ static uint16_t gAwaitingCmdSeq = 0;
 static float gBattV = 0.0f;
 static uint32_t gLastBattUpdateMs = 0;
 
-static String readLineNonBlocking() {
+static String readLineNonBlocking()
+{
   static String buf;
-  while (Serial.available()) {
+  while (Serial.available())
+  {
     char c = static_cast<char>(Serial.read());
-    if (c == '\r') continue;
-    if (c == '\n') {
+    if (c == '\r')
+      continue;
+    if (c == '\n')
+    {
       String line = buf;
       buf = "";
       line.trim();
       return line;
     }
     buf += c;
-    if (buf.length() > 128) buf.remove(0, buf.length() - 128);
+    if (buf.length() > 128)
+      buf.remove(0, buf.length() - 128);
   }
   return "";
 }
 
-static proto::Packet makeCommandPacket(proto::CommandKind kind, uint8_t minutes, uint16_t seq) {
+static proto::Packet makeCommandPacket(proto::CommandKind kind, uint8_t minutes, uint16_t seq)
+{
   proto::Packet pkt{};
   pkt.h.magic = proto::kMagic;
   pkt.h.version = proto::kVersion;
@@ -52,23 +58,27 @@ static proto::Packet makeCommandPacket(proto::CommandKind kind, uint8_t minutes,
   return pkt;
 }
 
-static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
+static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes)
+{
   const uint16_t cmdSeq = gSeq++;
   const proto::Packet cmd = makeCommandPacket(kind, minutes, cmdSeq);
   gAwaitingCmdSeq = cmdSeq;
 
-  statusLed.setBlink(200);  // Fast blink while sending command
-  Serial.printf("[LORA] Sending command kind=%d minutes=%d seq=%d\n", 
+  statusLed.setBlink(200); // Fast blink while sending command
+  Serial.printf("[LORA] Sending command kind=%d minutes=%d seq=%d\n",
                 static_cast<int>(kind), minutes, cmdSeq);
 
   uint32_t start = millis();
   uint32_t nextSend = 0;
   int sendCount = 0;
 
-  while (millis() - start < static_cast<uint32_t>(SENDER_CMD_ACK_TIMEOUT_MS)) {
+  while (millis() - start < static_cast<uint32_t>(SENDER_CMD_ACK_TIMEOUT_MS))
+  {
     const uint32_t now = millis();
-    if (now >= nextSend) {
-      if (loraLink.send(cmd)) {
+    if (now >= nextSend)
+    {
+      if (loraLink.send(cmd))
+      {
         sendCount++;
         Serial.printf("[LORA] Sent attempt #%d\n", sendCount);
       }
@@ -79,20 +89,23 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
     proto::Packet pkt{};
     int rssi = 0;
     float snr = 0;
-    if (loraLink.recv(pkt, rssi, snr)) {
-      Serial.printf("[LORA] Received packet type=%d src=%d\n", 
+    if (loraLink.recv(pkt, rssi, snr))
+    {
+      Serial.printf("[LORA] Received packet type=%d src=%d\n",
                     static_cast<int>(pkt.h.type), pkt.h.src);
-      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER) {
+      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
+      {
         gLastStatus = pkt.p.status;
         gLastStatus.lastRssiDbm = (int8_t)rssi;
         gLastStatus.lastSnrDb = (int8_t)snr;
         gLastStatusRxMs = millis();
 
-        Serial.printf("[LORA] Status lastCmdSeq=%d, expecting=%d\n", 
+        Serial.printf("[LORA] Status lastCmdSeq=%d, expecting=%d\n",
                       gLastStatus.lastCmdSeq, cmdSeq);
-        if (gLastStatus.lastCmdSeq == cmdSeq) {
+        if (gLastStatus.lastCmdSeq == cmdSeq)
+        {
           gAwaitingCmdSeq = 0;
-          statusLed.setOff();  // Turn off LED on successful ACK
+          statusLed.setOff(); // Turn off LED on successful ACK
           Serial.println("[LORA] ACK confirmed!");
           return true;
         }
@@ -106,47 +119,58 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
   Serial.printf("[LORA] Timeout after %d sends, no ACK\n", sendCount);
   statusLed.setOff();
   gAwaitingCmdSeq = 0;
-  return false;  // No ACK received = failure
+  return false; // No ACK received = failure
 }
 
-static const char* heaterStateToStr(proto::HeaterState s) {
-  switch (s) {
-    case proto::HeaterState::Off:
-      return "OFF";
-    case proto::HeaterState::Running:
-      return "RUN";
-    case proto::HeaterState::Error:
-      return "ERR";
-    default:
-      return "UNK";
+static const char *heaterStateToStr(proto::HeaterState s)
+{
+  switch (s)
+  {
+  case proto::HeaterState::Off:
+    return "OFF";
+  case proto::HeaterState::Running:
+    return "RUN";
+  case proto::HeaterState::Error:
+    return "ERR";
+  default:
+    return "UNK";
   }
 }
 
-static String formatMeasurements(const proto::StatusPayload& st) {
+static String formatMeasurements(const proto::StatusPayload &st)
+{
   // Keep it short to fit 128px width.
   String out;
-  if (st.temperatureC != INT16_MIN) {
+  if (st.temperatureC != INT16_MIN)
+  {
     out += String("T ") + String(st.temperatureC) + "C";
-  } else {
+  }
+  else
+  {
     out += "T --";
   }
 
-  if (st.voltage_mV != 0) {
+  if (st.voltage_mV != 0)
+  {
     out += String(" V ") + String(st.voltage_mV);
-  } else {
+  }
+  else
+  {
     out += " V --";
   }
 
-  if (st.power != 0) {
+  if (st.power != 0)
+  {
     out += String(" P ") + String(st.power);
   }
 
   return out;
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  delay(1000);  // Longer delay for serial to stabilize
+  delay(1000); // Longer delay for serial to stabilize
 
   Serial.println("\n\n==================================");
   Serial.println("  WEBASTO LORA SENDER");
@@ -177,14 +201,17 @@ void setup() {
 #endif
 }
 
-void loop() {
+void loop()
+{
   // Receive status from receiver.
   {
     proto::Packet pkt{};
     int rssi = 0;
     float snr = 0;
-    if (loraLink.recv(pkt, rssi, snr)) {
-      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER) {
+    if (loraLink.recv(pkt, rssi, snr))
+    {
+      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
+      {
         gLastStatus = pkt.p.status;
         gLastStatus.lastRssiDbm = (int8_t)rssi;
         gLastStatus.lastSnrDb = (int8_t)snr;
@@ -195,37 +222,60 @@ void loop() {
 
   // Handle serial UI.
   String line = readLineNonBlocking();
-  if (line.length() > 0) {
-    if (line.equalsIgnoreCase("stop")) {
-      if (sendCommandWithAck(proto::CommandKind::Stop, 0)) {
+  if (line.length() > 0)
+  {
+    if (line.equalsIgnoreCase("stop"))
+    {
+      if (sendCommandWithAck(proto::CommandKind::Stop, 0))
+      {
         Serial.println("Sent STOP (ACKed)");
-      } else {
+      }
+      else
+      {
         Serial.println("Failed to send STOP");
       }
-    } else if (line.equalsIgnoreCase("start")) {
-      if (sendCommandWithAck(proto::CommandKind::Start, gLastMinutes)) {
+    }
+    else if (line.equalsIgnoreCase("start"))
+    {
+      if (sendCommandWithAck(proto::CommandKind::Start, gLastMinutes))
+      {
         Serial.printf("Sent START (%u min, ACKed)\n", gLastMinutes);
-      } else {
+      }
+      else
+      {
         Serial.println("Failed to send START");
       }
-    } else if (line.startsWith("run") || line.startsWith("RUN")) {
+    }
+    else if (line.startsWith("run") || line.startsWith("RUN"))
+    {
       int space = line.indexOf(' ');
-      if (space < 0) {
+      if (space < 0)
+      {
         Serial.println("Usage: run <minutes>");
-      } else {
+      }
+      else
+      {
         int minutes = line.substring(space + 1).toInt();
-        if (minutes <= 0 || minutes > 255) {
+        if (minutes <= 0 || minutes > 255)
+        {
           Serial.println("Minutes must be 1..255");
-        } else {
+        }
+        else
+        {
           gLastMinutes = static_cast<uint8_t>(minutes);
-          if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes)) {
+          if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes))
+          {
             Serial.printf("Sent RUN (%u min, ACKed)\n", gLastMinutes);
-          } else {
+          }
+          else
+          {
             Serial.println("Failed to send RUN");
           }
         }
       }
-    } else {
+    }
+    else
+    {
       Serial.println("Unknown command. Use: start | stop | run <minutes>");
     }
   }
@@ -234,44 +284,57 @@ void loop() {
   statusLed.update();
 
   // Update battery voltage periodically
-  if (millis() - gLastBattUpdateMs > VBAT_UPDATE_INTERVAL_MS) {
+  if (millis() - gLastBattUpdateMs > VBAT_UPDATE_INTERVAL_MS)
+  {
     gLastBattUpdateMs = millis();
     int raw = analogRead(VBAT_ADC_PIN);
-    float vpin = (float)raw / 4095.0f * 3.3f;  // approx. ADC scale to volts
+    float vpin = (float)raw / 4095.0f * 3.3f; // approx. ADC scale to volts
     float vbat = vpin * VBAT_DIVIDER_RATIO * VBAT_CALIBRATION;
     // Simple low-pass filter to smooth jitter
-    if (gBattV <= 0.01f) {
+    if (gBattV <= 0.01f)
+    {
       gBattV = vbat;
-    } else {
+    }
+    else
+    {
       gBattV = (gBattV * 0.8f) + (vbat * 0.2f);
     }
   }
 
   // OLED refresh
   static uint32_t lastUiMs = 0;
-  if (millis() - lastUiMs > 250) {
+  if (millis() - lastUiMs > 250)
+  {
     lastUiMs = millis();
 
     ui.setLine(0, "Webasto LoRa Sender");
-    ui.setLine(1, String("Preset: ") + String(gLastMinutes) + " min  Bat " + String(gBattV, 2) + "V");
+    ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min Bat:" + String(gBattV, 2) + "V");
 
-    if (gLastStatusRxMs == 0) {
+    if (gLastStatusRxMs == 0)
+    {
       ui.setLine(2, "Status: (none)");
       ui.setLine(3, "");
       ui.setLine(4, "");
-    } else {
+    }
+    else
+    {
       uint32_t age = (millis() - gLastStatusRxMs) / 1000;
-      ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age " + String(age) + "s");
+      ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age:" + String(age) + "s");
       ui.setLine(3, formatMeasurements(gLastStatus));
       ui.setLine(4,
-                 String("Op 0x") + String(gLastStatus.lastWbusOpState, HEX) + " RSSI " + String(gLastStatus.lastRssiDbm) +
-                     " SNR " + String(gLastStatus.lastSnrDb));
+                 String("RSSI:" + String(gLastStatus.lastRssiDbm) +
+                     " SNR:" + String(gLastStatus.lastSnrDb) + "dB"));
     }
 
-    if (gAwaitingCmdSeq != 0) {
+    if (gAwaitingCmdSeq != 0)
+    {
       ui.setLine(5, String("Waiting ACK ") + String(gAwaitingCmdSeq));
-    } else {
-      ui.setLine(5, "Serial: start/stop/run");
+    }
+    else
+    {
+      // ui.setLine(5, "Serial: start/stop/run");
+      // show useful info instead
+      ui.setLine(5, String("Last CmdSeq: ") + String(gLastStatus.lastCmdSeq));
     }
     ui.render();
   }

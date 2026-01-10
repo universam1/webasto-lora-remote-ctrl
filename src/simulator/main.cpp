@@ -60,6 +60,16 @@ enum class SimState : uint8_t {
   Running,
   Cooling,
   Error,
+  TempOvershoot,
+  FlameOutRestart,
+};
+
+enum class SimScenario : uint8_t {
+  Normal,          // Smooth startup and running
+  FlameFlutter,    // Flame drops and restarts
+  HighTemp,        // Temperature overshoots, triggers cooling
+  VoltageDropped,  // Temporary voltage sag
+  ErrorShutdown,   // Automatic shutdown on error
 };
 
 struct SimModel {
@@ -69,21 +79,33 @@ struct SimModel {
 
   float ambientC = 20.0f;
   float tempC = 20.0f;
+  float targetTempC = 75.0f;
 
   uint16_t voltage_mV = 12400;
-  uint16_t heaterPower_x10 = 0; // in 0.1% / 0.1 units depending on page
+  uint16_t heaterPower_x10 = 0;
   uint16_t combustionFanRpm = 0;
   uint16_t glowResistance_mOhm = 1800;
 
   bool flame = false;
 
+  // Scenario tracking
+  SimScenario scenario = SimScenario::Normal;
+  uint32_t scenarioStartMs = 0;
+  bool scenarioTriggered = false;
+
+  // Noise/jitter for realism
+  float tempNoise = 0.0f;
+  float powerNoise = 0.0f;
+  uint16_t voltageNoise = 0;
+
   void setState(SimState s) {
     state = s;
     stateSinceMs = millis();
+    Serial.print("  [STATE] s=");
+    Serial.println(static_cast<int>(s));
   }
 
   uint8_t opStateCode() const {
-    // Coarse mapping. Receiver currently treats anything except 0x04/0x00 as “Running”.
     switch (state) {
       case SimState::Off:
         return 0x04;
@@ -93,65 +115,183 @@ struct SimModel {
         return 0x06;
       case SimState::Cooling:
         return 0x02;
+      case SimState::TempOvershoot:
+        return 0x06; // Still running, but overheated
+      case SimState::FlameOutRestart:
+        return 0x01; // Restarting after flame out
       case SimState::Error:
         return 0xFF;
     }
     return 0x04;
   }
 
+  // Select a random scenario for variety
+  void pickRandomScenario() {
+    uint8_t rand = random(100);
+    if (rand < 60) {
+      scenario = SimScenario::Normal;
+    } else if (rand < 75) {
+      scenario = SimScenario::FlameFlutter;
+      Serial.println("[SCENARIO] FlameFlutter");
+    } else if (rand < 85) {
+      scenario = SimScenario::HighTemp;
+      Serial.println("[SCENARIO] HighTemp");
+    } else if (rand < 95) {
+      scenario = SimScenario::VoltageDropped;
+      Serial.println("[SCENARIO] Voltage");
+    } else {
+      scenario = SimScenario::ErrorShutdown;
+      Serial.println("[SCENARIO] Error");
+    }
+    scenarioStartMs = millis();
+    scenarioTriggered = false;
+  }
+
   void tick() {
     const uint32_t now = millis();
-    const float targetRunC = 75.0f;
+    const uint32_t elapsedMs = now - stateSinceMs;
 
-    // Simple timing/state progression.
+    // Update noise values for realism
+    tempNoise = (random(200) - 100) * 0.01f; // ±1°C noise
+    powerNoise = (random(30) - 15); // ±15 power units
+    voltageNoise = random(100) - 50; // ±50mV noise
+
+    // State machine with scenario support
     switch (state) {
-      case SimState::Starting:
-        if (now - stateSinceMs > 15000) setState(SimState::Running);
+      case SimState::Starting: {
+        // Check for flame flicker scenario
+        if (scenario == SimScenario::FlameFlutter && !scenarioTriggered && elapsedMs > 8000) {
+          scenarioTriggered = true;
+          Serial.println("  [SCENARIO] Flame out detected, restarting...");
+          setState(SimState::FlameOutRestart);
+        }
+        // Check for error scenario
+        else if (scenario == SimScenario::ErrorShutdown && !scenarioTriggered && elapsedMs > 10000) {
+          scenarioTriggered = true;
+          Serial.println("  [SCENARIO] Error detected during startup!");
+          setState(SimState::Error);
+        }
+        // Normal progression
+        else if (elapsedMs > 15000) {
+          setState(SimState::Running);
+          pickRandomScenario(); // Pick next scenario for running phase
+        }
         break;
-      case SimState::Cooling:
-        if (now - stateSinceMs > 20000) setState(SimState::Off);
+      }
+
+      case SimState::Running: {
+        // Temperature overshoot check
+        if (scenario == SimScenario::HighTemp && !scenarioTriggered && tempC > 80.0f) {
+          scenarioTriggered = true;
+          targetTempC = 85.0f;
+          Serial.println("  [SCENARIO] Temperature overshoot, cooling initiated");
+          setState(SimState::TempOvershoot);
+        }
         break;
+      }
+
+      case SimState::TempOvershoot: {
+        // Cool back down
+        if (tempC < 70.0f) {
+          targetTempC = 75.0f;
+          setState(SimState::Running);
+        }
+        break;
+      }
+
+      case SimState::FlameOutRestart: {
+        // Try to restart
+        if (elapsedMs > 3000) {
+          setState(SimState::Starting);
+        }
+        break;
+      }
+
+      case SimState::Cooling: {
+        if (elapsedMs > 20000) {
+          setState(SimState::Off);
+        }
+        break;
+      }
+
+      case SimState::Error: {
+        // Auto-recover after 5 seconds
+        if (elapsedMs > 5000) {
+          setState(SimState::Off);
+        }
+        break;
+      }
+
       default:
         break;
     }
 
-    // Update synthetic measurements.
-    const float dt = 0.1f; // approximate smoothing, not wall-clock precise
-
+    // Temperature dynamics with noise
     if (state == SimState::Off) {
       flame = false;
       heaterPower_x10 = 0;
       combustionFanRpm = 0;
-      // Cool toward ambient
-      tempC += (ambientC - tempC) * 0.08f;
+      tempC += (ambientC - tempC) * 0.08f + tempNoise;
+
     } else if (state == SimState::Starting) {
       flame = false;
-      heaterPower_x10 = 250; // some preheat-ish value
-      combustionFanRpm = 1800;
-      tempC += (targetRunC - tempC) * 0.03f;
-      (void)dt;
+      heaterPower_x10 = static_cast<uint16_t>(constrain(250 + powerNoise, 0, 300));
+      combustionFanRpm = 1800 + random(200) - 100;
+      tempC += (targetTempC - tempC) * 0.03f + tempNoise;
+
     } else if (state == SimState::Running) {
+      // Flame flickering scenario
+      if (scenario == SimScenario::FlameFlutter) {
+        uint32_t phase = (now / 500) % 4;
+        flame = (phase < 3);
+      } else {
+        flame = true;
+      }
+
+      heaterPower_x10 = static_cast<uint16_t>(constrain(700 + powerNoise, 600, 800));
+      combustionFanRpm = 4200 + random(300) - 150;
+      tempC += (targetTempC - tempC) * 0.02f + tempNoise;
+
+    } else if (state == SimState::TempOvershoot) {
       flame = true;
-      heaterPower_x10 = 700;
-      combustionFanRpm = 4200;
-      tempC += (targetRunC - tempC) * 0.02f;
+      // Reduce power to cool down faster
+      heaterPower_x10 = static_cast<uint16_t>(constrain(400 + powerNoise, 300, 500));
+      combustionFanRpm = 4500;
+      tempC += (targetTempC - tempC) * 0.025f + tempNoise;
+
+    } else if (state == SimState::FlameOutRestart) {
+      flame = false;
+      heaterPower_x10 = static_cast<uint16_t>(constrain(300 + powerNoise, 200, 400));
+      combustionFanRpm = 2000 + random(300);
+      tempC += (targetTempC - tempC) * 0.02f + tempNoise;
+
     } else if (state == SimState::Cooling) {
       flame = false;
-      heaterPower_x10 = 100;
-      combustionFanRpm = 1500;
-      tempC += (ambientC - tempC) * 0.03f;
-    } else {
+      heaterPower_x10 = static_cast<uint16_t>(constrain(100 + powerNoise, 50, 150));
+      combustionFanRpm = 1500 + random(200) - 100;
+      tempC += (ambientC - tempC) * 0.03f + tempNoise;
+
+    } else if (state == SimState::Error) {
       flame = false;
       heaterPower_x10 = 0;
-      combustionFanRpm = 0;
+      combustionFanRpm = random(500);
+      tempC += (ambientC - tempC) * 0.05f;
     }
 
-    // Very slight voltage sag when active.
+    // Clamp temperature to reasonable range
+    tempC = constrain(tempC, ambientC - 5, 120.0f);
+
+    // Voltage dynamics
     if (state == SimState::Off) {
-      voltage_mV = 12400;
+      voltage_mV = 12400 + voltageNoise;
     } else {
-      voltage_mV = 12150;
+      // Voltage sag proportional to load
+      uint16_t sag = static_cast<uint16_t>((heaterPower_x10 / 10) + (combustionFanRpm / 50));
+      voltage_mV = static_cast<uint16_t>(12400 - sag + voltageNoise);
     }
+
+    // Voltage bounds
+    voltage_mV = constrain(voltage_mV, 11000, 13200);
   }
 };
 
@@ -407,10 +547,10 @@ static void handlePacket(const WBusPacket& pkt) {
       if (pkt.payloadLen < 3) break;
       gSim.requestedMinutes = pkt.payload[1];
       gSim.setState(SimState::Starting);
-      // ACK echoes the minutes
+      gSim.pickRandomScenario(); // Pick a scenario for this startup
       const uint8_t ack[1] = {gSim.requestedMinutes};
       sendFrame(static_cast<uint8_t>(0x21 | 0x80), ack, sizeof(ack));
-      Serial.printf("WBUS SIM: START HEATING for %u minutes\n", gSim.requestedMinutes);
+      Serial.printf("[WBUS SIM] START HEATING for %u minutes\n", gSim.requestedMinutes);
       break;
     }
 
@@ -428,7 +568,7 @@ static void handlePacket(const WBusPacket& pkt) {
     case 0x10: { // stop
       if (gSim.state != SimState::Off) gSim.setState(SimState::Cooling);
       sendFrame(static_cast<uint8_t>(0x10 | 0x80), nullptr, 0);
-      Serial.println("WBUS SIM: STOP HEATING");
+      Serial.println("[WBUS SIM] STOP HEATING - cooling initiated");
       break;
     }
 
@@ -477,32 +617,27 @@ static void handlePacket(const WBusPacket& pkt) {
 } // namespace
 
 void setup() {
+  delay(500);  // Extra delay for serial port to stabilize
   Serial.begin(115200);
-  delay(200);
+  delay(300);
 
-  Serial.println("\n\n==================================");
-  Serial.println("  WEBASTO W-BUS SIMULATOR");
-  Serial.println("  Device ID: SIMULATOR");
-  Serial.println("==================================");
-  Serial.println("WBUS simulator (ThermoTop-like) starting...");
-  Serial.printf("UART pins: RX=%d TX=%d\n", WBUS_RX_PIN, WBUS_TX_PIN);
-  Serial.printf("WBUS addrs: controller=0x%X heater=0x%X\n", WBUS_ADDR_CONTROLLER, WBUS_ADDR_HEATER);
-  Serial.printf("Headers: ctrl->heat=0x%02X heat->ctrl=0x%02X\n", controllerToHeaterHeader(), heaterToControllerHeader());
-
-  Serial.println("About to initialize W-BUS UART...");
+  // Note: W-BUS UART will be initialized AFTER serial setup to avoid conflicts
+  
+  Serial.println("\n\n======= SIMULATOR BOOT =======");
   Serial.flush();
   delay(100);
   
-  // Initialize W-BUS serial port
+  // Initialize W-BUS serial port (Serial2 on different pins)
   WBUS_SERIAL.begin(2400, SERIAL_8E1, WBUS_RX_PIN, WBUS_TX_PIN);
+  delay(100);
   
-  Serial.println("W-BUS UART initialized");
+  Serial.println("W-BUS initialized");
   Serial.flush();
 
   gSim.setState(SimState::Off);
   gSim.tempC = gSim.ambientC;
   
-  Serial.println("Simulator ready");
+  Serial.println("READY");
   Serial.flush();
 }
 

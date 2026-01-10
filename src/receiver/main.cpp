@@ -510,7 +510,34 @@ void loop() {
       ui.setLine(4, String("Last cmd: ") + String((millis() - gLastCmdMs) / 1000) + "s");
     }
 
-    ui.setLine(5, "WBUS 2400 8E1");
+    // Cycle through W-BUS status fields on line 5 every 3 seconds
+    static uint32_t lastStatusCycleMs = 0;
+    static uint8_t statusCycleIndex = 0;
+    
+    if (millis() - lastStatusCycleMs > 3000) {
+      lastStatusCycleMs = millis();
+      statusCycleIndex = (statusCycleIndex + 1) % 4;
+    }
+    
+    String statusLine;
+    switch (statusCycleIndex) {
+      case 0:  // Temperature
+        statusLine = String("Temp: ") + String(gStatus.temperatureC) + "C";
+        break;
+      case 1:  // Voltage
+        statusLine = String("Volt: ") + String(gStatus.voltage_mV) + "mV";
+        break;
+      case 2:  // Heater power
+        statusLine = String("Power: ") + String(gStatus.power);
+        break;
+      case 3:  // Operating state
+        statusLine = String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX);
+        break;
+      default:
+        statusLine = "WBUS 2400 8E1";
+    }
+    
+    ui.setLine(5, statusLine);
     ui.render();
   }
 }
