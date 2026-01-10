@@ -1,0 +1,11 @@
+{
+	"servers": {
+		"webasto-serial-debug": {
+			"command": "/home/sam/src/webasto-lora-remote-ctrl/mcp-serial-debug/venv/bin/python",
+			"args": [
+				"-m",
+				"webasto_serial_debug"
+			]
+		}
+	}
+}
