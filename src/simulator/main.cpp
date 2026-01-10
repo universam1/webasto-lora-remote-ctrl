@@ -3,11 +3,9 @@
 #include "project_config.h"
 #include "wbus_simple.h"
 
-// ESP32-C3 doesn't have Serial2, create custom HardwareSerial instance
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-HardwareSerial WBusSerial(1); // Use UART1 on ESP32-C3
-#define WBUS_SERIAL WBusSerial
-#else
+// Platform-agnostic W-BUS serial port definition
+// Classic ESP32 has Serial2 by default, other platforms can define custom UART
+#ifndef WBUS_SERIAL
 #define WBUS_SERIAL Serial2
 #endif
 

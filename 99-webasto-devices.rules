@@ -1,14 +1,11 @@
 ~# Webasto LoRa Remote Control - Device Port Aliases
 # Installation: 
-#   1. Ensure cdc_acm module is loaded: sudo modprobe cdc_acm
-#   2. Copy rule: sudo cp 99-webasto-devices.rules /etc/udev/rules.d/
-#   3. Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
-#
-# Note: For persistent cdc_acm loading, add 'cdc_acm' to /etc/modules
+#   sudo cp 99-webasto-devices.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
 
-# ESP32-C3 W-BUS Simulator (Native USB CDC)
-# Match by vendor:product and serial number using both ATTRS and ENV
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="98:88:E0:E7:86:CC", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="uucp"
+# ESP32 W-BUS Simulator (CP2102 USB-to-UART converter)
+# idVendor=10c4, idProduct=ea60, SerialNumber=0001
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", SYMLINK+="ttyWEBASTOSIM", MODE="0666", GROUP="uucp"
 
 # Add rules for sender and receiver here when you identify them:
 # Example format for CH340/CP2102 USB-Serial adapters:
