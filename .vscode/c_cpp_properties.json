@@ -488,7 +488,7 @@
                 "PLATFORMIO=60118",
                 "ARDUINO_TTGO_LoRa32_V1",
                 "CORE_DEBUG_LEVEL=0",
-                "LORA_FREQUENCY_HZ=868E6",
+                "LORA_FREQUENCY_HZ=433E6",
                 "LORA_SYNC_WORD=0x12",
                 "LORA_BW=125E3",
                 "LORA_SF=7",

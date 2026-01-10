@@ -68,6 +68,9 @@ static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& 
   const uint32_t start = millis();
   while (millis() - start < windowMs) {
     if (loraLink.recv(outPkt, lastCmdRssi, lastCmdSnr)) {
+      Serial.printf("[LORA-RX] Got packet: magic=0x%04X ver=%d type=%d src=%d dst=%d seq=%d\n",
+                    outPkt.h.magic, outPkt.h.version, static_cast<int>(outPkt.h.type),
+                    outPkt.h.src, outPkt.h.dst, outPkt.h.seq);
       if (outPkt.h.type == proto::MsgType::Command && outPkt.h.dst == LORA_NODE_RECEIVER) {
         return true;
       }
@@ -211,7 +214,7 @@ static void logSimpleStatusFlags(const WBusPacket& pkt, const char* label) {
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(1000);  // Longer delay for serial to stabilize
 
   Serial.println("\n\n==================================");
   Serial.println("  WEBASTO LORA RECEIVER");
@@ -279,6 +282,29 @@ void loop() {
   float lastCmdSnr = 0;
   proto::Packet pkt{};
 
+#ifdef DISABLE_SLEEP
+  // When sleep is disabled for testing, stay fully awake and continuously receive
+  ui.setPowerSave(false);
+  
+  static bool receiveModeSet = false;
+  if (!receiveModeSet) {
+    Serial.println("[TEST] Setting LoRa to receive mode...");
+    LoRa.receive();
+    receiveModeSet = true;
+    Serial.println("[TEST] LoRa receive mode set!");
+  }
+  
+  static uint32_t lastDebugPrint = 0;
+  if (millis() - lastDebugPrint > 5000) {
+    Serial.println("[TEST] DISABLE_SLEEP mode - continuously receiving LoRa");
+    lastDebugPrint = millis();
+  }
+  
+  // Receive LoRa packet in test/debug mode
+  loraLink.recv(pkt, lastCmdRssi, lastCmdSnr);
+  
+  // Don't return early - process commands below!
+#else
   if (!heaterRunning) {
     // OLED off while idle.
     ui.setPowerSave(true);
@@ -286,28 +312,41 @@ void loop() {
     // Short command listen window.
     bool gotCmd = tryReceiveCommandWindow(static_cast<uint32_t>(RX_IDLE_LISTEN_WINDOW_MS), lastCmdRssi, lastCmdSnr, pkt);
     if (gotCmd) {
+      Serial.printf("[LORA] Got command in idle window! type=%d seq=%d\n", 
+                    static_cast<int>(pkt.h.type), pkt.h.seq);
       // fall through to command handling below
     } else {
       // No command received: go back to sleep.
       // We intentionally avoid polling W-BUS here to minimize wake-time power draw.
       enterDeepSleepMs(static_cast<uint32_t>(RX_IDLE_SLEEP_MS));
+      return;  // Return early when sleeping to avoid falling through
     }
   } else {
     // Running mode: keep OLED on continuously.
     ui.setPowerSave(false);
   }
+#endif
 
   // Receive commands (continuous in running mode, or immediately after a wake window)
   {
+#ifndef DISABLE_SLEEP
+    // Only call recv here if we're in running mode (heater on)
+    // In idle mode with sleep enabled, recv was already done in tryReceiveCommandWindow
     if (heaterRunning) {
       if (!loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
         pkt = proto::Packet{};
       }
     }
+#endif
+    // With DISABLE_SLEEP, recv was already done above
 
     if (pkt.h.type == proto::MsgType::Command && pkt.h.dst == LORA_NODE_RECEIVER) {
+      Serial.printf("[LORA] Received command: kind=%d minutes=%d seq=%d rssi=%d snr=%.1f\n",
+                    static_cast<int>(pkt.p.cmd.kind), pkt.p.cmd.minutes, pkt.h.seq,
+                    lastCmdRssi, lastCmdSnr);
       // Deduplicate sender retries.
       if (pkt.h.seq == gLastProcessedCmdSeq) {
+        Serial.println("[LORA] Duplicate command, just ACKing");
         gStatus.lastCmdSeq = gLastProcessedCmdSeq;
         sendStatus(lastCmdRssi, lastCmdSnr);
       } else {
@@ -315,25 +354,37 @@ void loop() {
 
         switch (pkt.p.cmd.kind) {
           case proto::CommandKind::Stop:
+            Serial.println("[WBUS] Sending STOP command");
             ok = wbus.stop();
             if (ok) {
               gStatus.state = proto::HeaterState::Off;
+              Serial.println("[WBUS] STOP OK");
+            } else {
+              Serial.println("[WBUS] STOP FAILED");
             }
             break;
 
           case proto::CommandKind::Start:
             gLastRunMinutes = pkt.p.cmd.minutes ? pkt.p.cmd.minutes : gLastRunMinutes;
+            Serial.printf("[WBUS] Sending START command for %d minutes\n", gLastRunMinutes);
             ok = wbus.startParkingHeater(gLastRunMinutes);
             if (ok) {
               gStatus.state = proto::HeaterState::Running;
+              Serial.println("[WBUS] START OK");
+            } else {
+              Serial.println("[WBUS] START FAILED");
             }
             break;
 
           case proto::CommandKind::RunMinutes:
             gLastRunMinutes = pkt.p.cmd.minutes ? pkt.p.cmd.minutes : gLastRunMinutes;
+            Serial.printf("[WBUS] Sending RUN command for %d minutes\n", gLastRunMinutes);
             ok = wbus.startParkingHeater(gLastRunMinutes);
             if (ok) {
               gStatus.state = proto::HeaterState::Running;
+              Serial.println("[WBUS] RUN OK");
+            } else {
+              Serial.println("[WBUS] RUN FAILED");
             }
             break;
 

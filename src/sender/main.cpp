@@ -58,15 +58,20 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
   gAwaitingCmdSeq = cmdSeq;
 
   statusLed.setBlink(200);  // Fast blink while sending command
+  Serial.printf("[LORA] Sending command kind=%d minutes=%d seq=%d\n", 
+                static_cast<int>(kind), minutes, cmdSeq);
 
   uint32_t start = millis();
   uint32_t nextSend = 0;
-  bool anySendOk = false;
+  int sendCount = 0;
 
   while (millis() - start < static_cast<uint32_t>(SENDER_CMD_ACK_TIMEOUT_MS)) {
     const uint32_t now = millis();
     if (now >= nextSend) {
-      anySendOk |= loraLink.send(cmd);
+      if (loraLink.send(cmd)) {
+        sendCount++;
+        Serial.printf("[LORA] Sent attempt #%d\n", sendCount);
+      }
       nextSend = now + static_cast<uint32_t>(SENDER_CMD_RETRY_INTERVAL_MS);
     }
 
@@ -75,15 +80,20 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
     int rssi = 0;
     float snr = 0;
     if (loraLink.recv(pkt, rssi, snr)) {
+      Serial.printf("[LORA] Received packet type=%d src=%d\n", 
+                    static_cast<int>(pkt.h.type), pkt.h.src);
       if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER) {
         gLastStatus = pkt.p.status;
         gLastStatus.lastRssiDbm = (int8_t)rssi;
         gLastStatus.lastSnrDb = (int8_t)snr;
         gLastStatusRxMs = millis();
 
+        Serial.printf("[LORA] Status lastCmdSeq=%d, expecting=%d\n", 
+                      gLastStatus.lastCmdSeq, cmdSeq);
         if (gLastStatus.lastCmdSeq == cmdSeq) {
           gAwaitingCmdSeq = 0;
           statusLed.setOff();  // Turn off LED on successful ACK
+          Serial.println("[LORA] ACK confirmed!");
           return true;
         }
       }
@@ -92,9 +102,11 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes) {
     delay(10);
   }
 
-  // Timed out.
-  statusLed.setOff();  // Turn off LED on timeout
-  return anySendOk;
+  // Timed out - no ACK received
+  Serial.printf("[LORA] Timeout after %d sends, no ACK\n", sendCount);
+  statusLed.setOff();
+  gAwaitingCmdSeq = 0;
+  return false;  // No ACK received = failure
 }
 
 static const char* heaterStateToStr(proto::HeaterState s) {
@@ -134,7 +146,7 @@ static String formatMeasurements(const proto::StatusPayload& st) {
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(1000);  // Longer delay for serial to stabilize
 
   Serial.println("\n\n==================================");
   Serial.println("  WEBASTO LORA SENDER");

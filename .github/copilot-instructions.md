@@ -43,7 +43,8 @@ These are configured in `include/project_config.h` and used by `lib/common/lora_
 ## LoRa link details
 
 - Library: `sandeepmistry/LoRa`
-- Frequency is configured via `LORA_FREQUENCY_HZ` build flag in `platformio.ini`.
+- **CRITICAL**: The current TTGO LoRa32 boards are **433 MHz variants**. The SX1276 chip is frequency-agile but the antenna is tuned for 433 MHz only. Using 868E6 or 915E6 will result in no signal reception (RSSI -157).
+- Frequency is configured via `LORA_FREQUENCY_HZ` build flag in `platformio.ini` (currently set to `433E6`).
 - PHY parameters are set in `lib/common/lora_link.cpp`:
   - `LORA_SYNC_WORD`
   - `LORA_BW` (bandwidth)
@@ -54,7 +55,7 @@ These are configured in `include/project_config.h` and used by `lib/common/lora_
 ### Range tuning (high-level)
 - Higher `LORA_SF` and lower `LORA_BW` improve sensitivity/range but increase time-on-air.
 - Higher `LORA_CR` improves robustness but reduces throughput.
-- Be mindful of regional regulations (e.g., EU868 duty cycle) when increasing time-on-air.
+- Be mindful of regional regulations (e.g., EU433 ISM band) when increasing time-on-air.
 
 ---
 

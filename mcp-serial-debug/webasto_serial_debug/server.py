@@ -6,6 +6,8 @@ Provides tools to connect, monitor, and interact with ESP32 devices over serial.
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
 
@@ -30,21 +32,49 @@ connections: Dict[str, serial.Serial] = {}
 
 
 class SerialDeviceManager:
-    """Manages serial device connections"""
+    """Manages serial device connections with background reading"""
 
     def __init__(self):
         self.connections: Dict[str, serial.Serial] = {}
         self.read_buffers: Dict[str, list] = {}
-        self.buffer_max_lines = 1000
+        self.buffer_locks: Dict[str, threading.Lock] = {}
+        self.reader_threads: Dict[str, threading.Thread] = {}
+        self.reader_running: Dict[str, bool] = {}
+        self.buffer_max_lines = 2000
+
+    def _reader_thread(self, device: str):
+        """Background thread that continuously reads from serial port"""
+        logger.info(f"[{device}] Reader thread started")
+        while self.reader_running.get(device, False):
+            try:
+                ser = self.connections.get(device)
+                if ser is None or not ser.is_open:
+                    break
+                
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode('utf-8', errors='replace').strip()
+                    if line:
+                        with self.buffer_locks[device]:
+                            self.read_buffers[device].append(line)
+                            # Keep buffer size manageable
+                            while len(self.read_buffers[device]) > self.buffer_max_lines:
+                                self.read_buffers[device].pop(0)
+                else:
+                    time.sleep(0.01)  # Small sleep to avoid busy waiting
+            except Exception as e:
+                if self.reader_running.get(device, False):
+                    logger.error(f"[{device}] Reader error: {e}")
+                break
+        logger.info(f"[{device}] Reader thread stopped")
 
     def list_devices(self) -> list[dict]:
         """List available Webasto devices"""
+        import os
         devices = []
         for alias, path in DEVICE_ALIASES.items():
             try:
-                # Check if device exists
-                ports = [p.device for p in list_ports.comports()]
-                exists = path in ports or any(p.device for p in list_ports.comports() if p.device == path)
+                # Check if device exists (symlink or direct path)
+                exists = os.path.exists(path)
                 
                 connected = alias in self.connections and self.connections[alias].is_open
                 devices.append({
@@ -64,8 +94,8 @@ class SerialDeviceManager:
                 })
         return devices
 
-    def connect(self, device: str, baud_rate: int = 115200, timeout: float = 1.0) -> str:
-        """Connect to a device"""
+    def connect(self, device: str, baud_rate: int = 115200, timeout: float = 0.1) -> str:
+        """Connect to a device and start background reader"""
         if device in self.connections and self.connections[device].is_open:
             return f"Already connected to {device}"
 
@@ -82,22 +112,38 @@ class SerialDeviceManager:
             )
             self.connections[device] = ser
             self.read_buffers[device] = []
+            self.buffer_locks[device] = threading.Lock()
+            
+            # Start background reader thread
+            self.reader_running[device] = True
+            thread = threading.Thread(target=self._reader_thread, args=(device,), daemon=True)
+            thread.start()
+            self.reader_threads[device] = thread
+            
             logger.info(f"Connected to {device} at {path} ({baud_rate} baud)")
-            return f"Connected to {device} at {path} ({baud_rate} baud)"
+            return f"Connected to {device} at {path} ({baud_rate} baud) - background reader started"
         except Exception as e:
             logger.error(f"Failed to connect to {device}: {e}")
             raise Exception(f"Failed to connect to {device}: {e}")
 
     def disconnect(self, device: str) -> str:
-        """Disconnect from a device"""
+        """Disconnect from a device and stop background reader"""
         if device not in self.connections:
             return f"Not connected to {device}"
 
         try:
+            # Stop background reader
+            self.reader_running[device] = False
+            if device in self.reader_threads:
+                self.reader_threads[device].join(timeout=1.0)
+                del self.reader_threads[device]
+            
             self.connections[device].close()
             del self.connections[device]
             if device in self.read_buffers:
                 del self.read_buffers[device]
+            if device in self.buffer_locks:
+                del self.buffer_locks[device]
             logger.info(f"Disconnected from {device}")
             return f"Disconnected from {device}"
         except Exception as e:
@@ -105,24 +151,14 @@ class SerialDeviceManager:
             raise Exception(f"Error disconnecting from {device}: {e}")
 
     def read(self, device: str, lines: int = 50) -> str:
-        """Read available data from device"""
+        """Read buffered data from device (background thread collects data)"""
         if device not in self.connections:
             raise Exception(f"Not connected to {device}")
 
-        ser = self.connections[device]
         try:
-            # Read all available data
-            while ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8', errors='replace').strip()
-                if line:
-                    self.read_buffers[device].append(line)
-                    # Keep buffer size manageable
-                    if len(self.read_buffers[device]) > self.buffer_max_lines:
-                        self.read_buffers[device].pop(0)
-
-            # Return last N lines
-            buffer = self.read_buffers.get(device, [])
-            recent = buffer[-lines:] if len(buffer) > lines else buffer
+            with self.buffer_locks[device]:
+                buffer = self.read_buffers.get(device, [])
+                recent = buffer[-lines:] if len(buffer) > lines else buffer[:]
             
             if not recent:
                 return f"No data available from {device}"
@@ -164,11 +200,14 @@ class SerialDeviceManager:
 
         if connected:
             ser = self.connections[device]
+            with self.buffer_locks.get(device, threading.Lock()):
+                buffer_lines = len(self.read_buffers.get(device, []))
             status.update({
                 "baud_rate": ser.baudrate,
                 "timeout": ser.timeout,
                 "in_waiting": ser.in_waiting,
-                "buffer_lines": len(self.read_buffers.get(device, [])),
+                "buffer_lines": buffer_lines,
+                "reader_active": self.reader_running.get(device, False),
             })
 
         return status
