@@ -79,6 +79,7 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes)
     {
       if (loraLink.send(cmd))
       {
+        statusLed.toggle();  // Flash LED on TX
         sendCount++;
         Serial.printf("[LORA] Sent attempt #%d\n", sendCount);
       }
@@ -210,6 +211,7 @@ void loop()
     float snr = 0;
     if (loraLink.recv(pkt, rssi, snr))
     {
+      statusLed.toggle();  // Flash LED on RX
       if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
       {
         gLastStatus = pkt.p.status;

@@ -63,12 +63,19 @@
 #endif
 
 #ifndef LORA_SF
-#define LORA_SF 7
+// Spreading Factor (SF):
+// SF7  = ~500m range, 5.5 kbps speed (short-range high-speed)
+// SF11 = ~5-10km range, 1.5 kbps speed (recommended balance) - DEFAULT
+// SF12 = ~15-20km range, 0.3 kbps speed (extreme range, very slow)
+#define LORA_SF 11
 #endif
 
 #ifndef LORA_CR
-// LoRa library uses coding rate denominator 5..8 (4/5 .. 4/8)
-#define LORA_CR 5
+// Coding Rate (CR): 4/N where N=5..8 (higher = better error correction)
+// CR=5 (4/5) = fast, less robust
+// CR=7 (4/7) = balanced - DEFAULT
+// CR=8 (4/8) = slow, most robust
+#define LORA_CR 7
 #endif
 
 // -------------------------

@@ -40,6 +40,12 @@ class StatusLed {
     }
   }
 
+  // Toggle LED immediately (pulse/blink indicator)
+  // This creates a brief pulse regardless of current mode
+  void toggle() {
+    digitalWrite(ledPin, digitalRead(ledPin) == HIGH ? LOW : HIGH);
+  }
+
   // Set LED to blink with given period (ms on + ms off)
   void setBlink(uint16_t periodMs = 500) {
     currentMode = Mode::Blink;
