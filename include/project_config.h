@@ -85,7 +85,8 @@
 #define WBUS_TX_PIN 17
 #endif
 #ifndef WBUS_RX_PIN
-#define WBUS_RX_PIN 34
+// GPIO25 is available on TTGO LoRa32 (GPIO16 is used by OLED_RST)
+#define WBUS_RX_PIN 25
 #endif
 #ifndef WBUS_EN_PIN
 #define WBUS_EN_PIN -1

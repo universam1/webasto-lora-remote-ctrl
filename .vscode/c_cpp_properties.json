@@ -495,6 +495,7 @@
                 "LORA_CR=5",
                 "DISABLE_SLEEP=1",
                 "DEVICE_ROLE_RECEIVER=1",
+                "WBUS_RX_PIN=25",
                 "HAVE_CONFIG_H",
                 "MBEDTLS_CONFIG_FILE=\"mbedtls/esp_config.h\"",
                 "UNITY_INCLUDE_CONFIG_H",

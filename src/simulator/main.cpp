@@ -504,20 +504,44 @@ void setup() {
 
 void loop() {
   static uint32_t lastDebug = 0;
+  static uint32_t lastByteDebug = 0;
+  static uint32_t byteCount = 0;
+  static WBusSimple wbus(WBUS_SERIAL);
+  static bool wbusInitialized = false;
+  
   uint32_t now = millis();
+  
+  // Initialize WBusSimple on first call
+  if (!wbusInitialized) {
+    wbus.begin();
+    wbusInitialized = true;
+  }
   
   // Print periodic heartbeat
   if (now - lastDebug > 5000) {
-    Serial.printf("Alive: %lu ms, state=%d\n", now, static_cast<int>(gSim.state));
+    Serial.printf("Alive: %lu ms, state=%d, bytes_rx=%lu\n", now, static_cast<int>(gSim.state), byteCount);
     lastDebug = now;
+    byteCount = 0;
   }
   
   gSim.tick();
 
-  // Check for incoming W-BUS frames manually
-  while (WBUS_SERIAL.available() > 0) {
-    // For now, just drain the buffer since we're not processing commands
-    WBUS_SERIAL.read();
+  // Count incoming bytes for debugging
+  if (WBUS_SERIAL.available() > 0) {
+    const uint32_t avail = WBUS_SERIAL.available();
+    byteCount += avail;
+    if (now - lastByteDebug > 1000) {
+      Serial.printf("WBUS: %lu bytes available\n", avail);
+      lastByteDebug = now;
+    }
+  }
+
+  // Process incoming W-BUS frames
+  wbus.poll();
+  WBusPacket pkt;
+  while (wbus.popPacket(pkt)) {
+    Serial.printf("WBUS RX: hdr=0x%02X cmd=0x%02X len=%u\n", pkt.header, pkt.payload[0], pkt.payloadLen);
+    handlePacket(pkt);
   }
 
   delay(10);
