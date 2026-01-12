@@ -81,7 +81,7 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes)
     {
       if (loraLink.send(cmd))
       {
-        statusLed.toggle();  // Flash LED on TX
+        statusLed.toggle(); // Flash LED on TX
         sendCount++;
         Serial.printf("[LORA] Sent attempt #%d\n", sendCount);
       }
@@ -146,7 +146,7 @@ static String formatMeasurements(const proto::StatusPayload &st)
   String out;
   if (st.temperatureC != INT16_MIN)
   {
-    out += String("T ") + String(st.temperatureC) + "C";
+    out += String("T:") + String(st.temperatureC) + "C";
   }
   else
   {
@@ -155,7 +155,7 @@ static String formatMeasurements(const proto::StatusPayload &st)
 
   if (st.voltage_mV != 0)
   {
-    out += String(" V ") + String(st.voltage_mV);
+    out += String(" V:") + String(st.voltage_mV / 1000.0f, 1) + "V";
   }
   else
   {
@@ -164,7 +164,7 @@ static String formatMeasurements(const proto::StatusPayload &st)
 
   if (st.power != 0)
   {
-    out += String(" P ") + String(st.power);
+    out += String(" P:") + String(st.power) + "W";
   }
 
   return out;
@@ -273,7 +273,7 @@ void setup()
   Serial.println("==================================");
 
   statusLed.begin();
-  statusLed.setOff();  // Start with LED off, will toggle on packet activity
+  statusLed.setOff(); // Start with LED off, will toggle on packet activity
 
   ui.begin();
   ui.setLine(0, "Webasto LoRa Sender");
@@ -314,7 +314,7 @@ void loop()
     float snr = 0;
     if (loraLink.recv(pkt, rssi, snr))
     {
-      statusLed.toggle();  // Flash LED on RX
+      statusLed.toggle(); // Flash LED on RX
       if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
       {
         gLastStatus = pkt.p.status;
@@ -448,8 +448,8 @@ void loop()
     else
     {
       // Render normal status view
-      ui.setLine(0, "Webasto LoRa Sender");
-      ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min Bat:" + String(gBattV, 2) + "V");
+      ui.setLine(0, "Webasto Sender Bat:" + String(gBattV, 1) + "V");
+      ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min -> " + String(gLastStatus.minutesRemaining) + "min");
 
       if (gLastStatusRxMs == 0)
       {
@@ -464,7 +464,7 @@ void loop()
         ui.setLine(3, formatMeasurements(gLastStatus));
         ui.setLine(4,
                    String("RSSI:" + String(gLastStatus.lastRssiDbm) +
-                       " SNR:" + String(gLastStatus.lastSnrDb) + "dB"));
+                          " SNR:" + String(gLastStatus.lastSnrDb) + "dB"));
       }
 
       if (gAwaitingCmdSeq != 0)

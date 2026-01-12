@@ -5,3 +5,4 @@
 
 # Credentials (never commit these!)
 include/credentials.h
+.vscode/c_cpp_properties.json
