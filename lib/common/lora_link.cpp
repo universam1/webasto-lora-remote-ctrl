@@ -24,6 +24,11 @@ bool LoRaLink::begin() {
   LoRa.setCodingRate4(LORA_CR);
   LoRa.enableCrc();
 
+  // TX power boost for improved range
+  #if LORA_TX_POWER_BOOST
+  LoRa.setTxPower(20, PA_OUTPUT_PA_BOOST_PIN);
+  #endif
+
   // Put radio into continuous receive mode
   LoRa.receive();
 

@@ -75,11 +75,13 @@
 #define LORA_BW 125E3
 #define LORA_SF 11
 #define LORA_CR 7
+#define LORA_TX_POWER_BOOST 1
 #endif
 #ifdef LORA_RANGE_EXTREME
 #define LORA_BW 125E3
 #define LORA_SF 12
 #define LORA_CR 8
+#define LORA_TX_POWER_BOOST 1
 #endif
 
 #ifndef LORA_BW
@@ -100,6 +102,12 @@
 // CR=7 (4/7) = balanced - DEFAULT
 // CR=8 (4/8) = slow, most robust
 #define LORA_CR 7
+#endif
+
+#ifndef LORA_TX_POWER_BOOST
+// Enable TX power boost (20 dBm PA_OUTPUT_PA_BOOST_PIN) for improved range.
+// Set to 1 to enable, 0 to disable. Default: 0
+#define LORA_TX_POWER_BOOST 0
 #endif
 
 // -------------------------
