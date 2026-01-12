@@ -175,7 +175,7 @@
 
 // Receiver: how long to keep LoRa in RX after waking (ms)
 #ifndef RX_IDLE_LISTEN_WINDOW_MS
-#define RX_IDLE_LISTEN_WINDOW_MS 400
+#define RX_IDLE_LISTEN_WINDOW_MS 3000
 #endif
 
 // Receiver: deep-sleep interval when heater is OFF/idle (ms)
@@ -191,12 +191,17 @@
 
 // Sender: how long to retry a command waiting for correlated status ACK (ms)
 #ifndef SENDER_CMD_ACK_TIMEOUT_MS
-#define SENDER_CMD_ACK_TIMEOUT_MS 10000
+#define SENDER_CMD_ACK_TIMEOUT_MS 15000  // Increased from 10s to give more time
 #endif
 
 // Sender: resend interval while waiting for ACK (ms)
 #ifndef SENDER_CMD_RETRY_INTERVAL_MS
-#define SENDER_CMD_RETRY_INTERVAL_MS 1000
+#define SENDER_CMD_RETRY_INTERVAL_MS 1300  // Increased from 1s to allow RX windows
+#endif
+
+// Receiver: W-BUS polling interval when heater is running (ms)
+#ifndef RECEIVER_WBUS_POLL_INTERVAL_MS
+#define RECEIVER_WBUS_POLL_INTERVAL_MS 5000  // Poll W-BUS and send status every 2s
 #endif
 
 // LoRa addressing (simple point-to-point)

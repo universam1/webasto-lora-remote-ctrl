@@ -44,11 +44,16 @@ int currentFreqIndex = 0;  // Start at 433 MHz
 uint32_t txCount = 0;
 uint32_t rxCount = 0;
 bool receiveMode = false;
+bool callbackMode = false;
 int txPower = TX_POWER_LOW;  // Start with low power for close-range testing
+
+// ISR call counter for diagnostics
+volatile uint32_t isrCallCount = 0;
 
 // Callback for interrupt-based receive
 void onReceiveCallback(int packetSize) {
-  Serial.printf("*** CALLBACK: Received packet! size=%d ***\n", packetSize);
+  isrCallCount++;  // Track ISR invocations
+  Serial.printf("*** CALLBACK #%lu: Received packet! size=%d ***\n", isrCallCount, packetSize);
   Serial.print("  Data: ");
   while (LoRa.available()) {
     char c = (char)LoRa.read();
@@ -170,19 +175,29 @@ void loop() {
         break;
       case 'c':
       case 'C':
+      {
         // Callback-based receive (uses DIO0 interrupt)
         Serial.println("Entering receive mode (callback/interrupt)...");
+        Serial.printf("DIO0 pin %d -> interrupt %d\n", LORA_DIO0, digitalPinToInterrupt(LORA_DIO0));
+        pinMode(LORA_DIO0, INPUT);
+        int dio0State = digitalRead(LORA_DIO0);
+        Serial.printf("DIO0 initial state: %s\n", dio0State ? "HIGH" : "LOW");
+        isrCallCount = 0;  // Reset counter
         LoRa.onReceive(onReceiveCallback);
         LoRa.receive();
         receiveMode = false;  // Don't poll, use callback
+        callbackMode = true;
         Serial.println("Now listening via interrupt callback...");
+        Serial.println("Watch for DIO0 state changes and ISR call count...");
         break;
+      }
       case 's':
       case 'S':
         Serial.println("Stopping receive mode");
         LoRa.onReceive(NULL);  // Disable callback if set
         LoRa.idle();
         receiveMode = false;
+        callbackMode = false;
         break;
       case 'f':
       case 'F':
@@ -213,6 +228,9 @@ void loop() {
         Serial.printf("  Last packet RSSI: %d\n", LoRa.packetRssi());
         Serial.printf("  Last packet SNR: %.1f\n", LoRa.packetSnr());
         Serial.printf("  Frequency error: %ld Hz\n", LoRa.packetFrequencyError());
+        Serial.printf("  DIO0 pin state: %s\n", digitalRead(LORA_DIO0) ? "HIGH" : "LOW");
+        Serial.printf("  ISR call count: %lu\n", isrCallCount);
+        Serial.printf("  Callback mode: %s\n", callbackMode ? "ACTIVE" : "inactive");
         Serial.println("  NOTE: RSSI around -127 to -157 means no signal detected");
         Serial.println("  Check that antennas are connected on BOTH boards!");
         break;
@@ -244,6 +262,31 @@ void loop() {
     if (millis() - lastStatus > 5000) {
       Serial.printf("[Status] Listening... rxCount=%lu rssi_floor=%d\n", rxCount, LoRa.packetRssi());
       lastStatus = millis();
+    }
+  }
+  
+  // If in callback mode, monitor DIO0 and ISR status
+  if (callbackMode) {
+    static uint32_t lastDio0Check = 0;
+    static uint32_t lastIsrCount = 0;
+    static uint8_t lastDio0State = 0;
+    
+    if (millis() - lastDio0Check > 3000) {
+      int dio0 = digitalRead(LORA_DIO0);
+      if (isrCallCount != lastIsrCount) {
+        Serial.printf("[Callback] ISR active! Count=%lu (delta=%lu), DIO0=%d\n", 
+                      isrCallCount, isrCallCount - lastIsrCount, dio0);
+        lastIsrCount = isrCallCount;
+      } else {
+        Serial.printf("[Callback] No ISR calls (count still %lu), DIO0=%d\n", isrCallCount, dio0);
+      }
+      
+      if (dio0 != lastDio0State) {
+        Serial.printf("[Callback] DIO0 changed: %d -> %d\n", lastDio0State, dio0);
+      }
+      
+      lastDio0State = dio0;
+      lastDio0Check = millis();
     }
   }
   

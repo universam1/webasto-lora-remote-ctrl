@@ -86,8 +86,23 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes)
         sendCount++;
         Serial.printf("[LORA] Sent attempt #%d\n", sendCount);
       }
-      nextSend = now + static_cast<uint32_t>(SENDER_CMD_RETRY_INTERVAL_MS);
+      // Add random jitter (±25%) to avoid collision with status updates
+      uint32_t jitter = (random(50) - 25) * SENDER_CMD_RETRY_INTERVAL_MS / 100;
+      nextSend = now + static_cast<uint32_t>(SENDER_CMD_RETRY_INTERVAL_MS) + jitter;
     }
+
+    // Check if we already have an ACK (might have been received by main loop)
+    if (gLastStatus.lastCmdSeq == cmdSeq) {
+      gAwaitingCmdSeq = 0;
+      statusLed.setOff();
+      Serial.printf("[LORA] ACK already received by main loop! (lastCmdSeq=%d == cmdSeq=%d)\n",
+                    gLastStatus.lastCmdSeq, cmdSeq);
+      return true;
+    }
+
+    // Feed watchdog and yield to prevent timeout
+    yield();
+    delay(10);  // Small delay to avoid tight loop
 
     // Pump RX while we wait.
     proto::Packet pkt{};
@@ -116,7 +131,7 @@ static bool sendCommandWithAck(proto::CommandKind kind, uint8_t minutes)
       }
     }
 
-    delay(10);
+    yield();  // Let RTOS scheduler run other tasks
   }
 
   // Timed out - no ACK received
@@ -171,15 +186,18 @@ static String formatMeasurements(const proto::StatusPayload &st)
   return out;
 }
 
+// Global state for menu confirmation flash
+static uint32_t gMenuFlashStartMs = 0;
+static bool gMenuFlashActive = false;
+
 static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
 
-  // Brief inverted flash to confirm activation
+  // Trigger confirmation flash (handled non-blocking in main loop)
+  gMenuFlashStartMs = millis();
+  gMenuFlashActive = true;
   ui.setInverted(true);
-  ui.render();
-  delay(150);
-  ui.setInverted(false);
   
   // Clear progress bar
   ui.drawProgressBar(0, 0, 0.0f);
@@ -275,7 +293,9 @@ static void handleMenuSelection(MenuItem item)
 void setup()
 {
   Serial.begin(115200);
-  delay(1000); // Longer delay for serial to stabilize
+  while (!Serial && millis() < 1000) {
+    yield();  // Wait up to 1s for serial, allow RTOS tasks
+  }
 
   Serial.println("\n\n==================================");
   Serial.println("  WEBASTO LORA SENDER");
@@ -292,6 +312,7 @@ void setup()
 
   bool ok = loraLink.begin();
   ui.setLine(1, ok ? "LoRa OK" : "LoRa FAIL");
+  
   ui.setLine(2, String("Freq ") + String((uint32_t)LORA_FREQUENCY_HZ));
   ui.setLine(3, "Cmd via Serial:");
   ui.setLine(4, "start|stop|run N");
@@ -305,32 +326,67 @@ void setup()
   menu.begin(MENU_BUTTON_PIN);
   Serial.println("[SETUP] Menu button initialized on GPIO0");
 
-  Serial.println("Sender ready. Commands: start | stop | run <minutes>");
-
   // Initialize battery ADC (GPIO35 on TTGO LoRa32 v1.0)
   // Use 11dB attenuation for better range.
 #ifdef ARDUINO_ARCH_ESP32
   adcAttachPin(VBAT_ADC_PIN);
   analogSetPinAttenuation(VBAT_ADC_PIN, ADC_11db);
 #endif
+
+  // Enable LoRa interrupt LAST to avoid any interference from other setup
+  if (ok) {
+    loraLink.enableInterrupt();
+    ui.setLine(1, "LoRa OK (IRQ)");
+    ui.render();
+  }
+
+  Serial.println("Sender ready. Commands: start | stop | run <minutes>");
 }
 
 void loop()
 {
-  // Receive status from receiver.
+  // Debug: Log ISR call count periodically
+  static uint32_t lastIsrCount = 0;
+  static uint32_t lastIsrLogMs = 0;
+  static uint32_t lastDio0State = 0;
+  if (millis() - lastIsrLogMs > 5000) {
+    uint32_t currentCount = loraLink.getIsrCallCount();
+    int dio0 = digitalRead(LORA_DIO0);
+    
+    if (currentCount != lastIsrCount) {
+      Serial.printf("[DEBUG] ISR called %lu times (delta=%lu), DIO0=%d\n", 
+                    (unsigned long)currentCount, (unsigned long)(currentCount - lastIsrCount), dio0);
+      lastIsrCount = currentCount;
+    } else {
+      Serial.printf("[DEBUG] ISR NOT being called! DIO0=%d\n", dio0);
+    }
+    
+    if (dio0 != (int)lastDio0State) {
+      Serial.printf("[DEBUG] DIO0 state changed: %d -> %d (but no ISR!)\n", lastDio0State, dio0);
+    }
+    
+    lastDio0State = dio0;
+    lastIsrLogMs = millis();
+  }
+  
+  // Receive status from receiver (interrupt-driven, only processes when packet available)
   {
-    proto::Packet pkt{};
-    int rssi = 0;
-    float snr = 0;
-    if (loraLink.recv(pkt, rssi, snr))
-    {
-      statusLed.toggle(); // Flash LED on RX
-      if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
+    if (loraLink.hasPacket()) {
+      proto::Packet pkt{};
+      int rssi = 0;
+      float snr = 0;
+      if (loraLink.recv(pkt, rssi, snr))
       {
-        gLastStatus = pkt.p.status;
-        gLastStatus.lastRssiDbm = (int8_t)rssi;
-        gLastStatus.lastSnrDb = (int8_t)snr;
-        gLastStatusRxMs = millis();
+        statusLed.toggle(); // Flash LED on RX
+        if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
+        {
+          gLastStatus = pkt.p.status;
+          gLastStatus.lastRssiDbm = (int8_t)rssi;
+          gLastStatus.lastSnrDb = (int8_t)snr;
+          gLastStatusRxMs = millis();
+          Serial.printf("[LOOP] Received status lastCmdSeq=%d (awaiting=%d)\n", 
+                        gLastStatus.lastCmdSeq, gAwaitingCmdSeq);
+        }
       }
     }
   }
@@ -397,6 +453,14 @@ void loop()
 
   // Update LED
   statusLed.update();
+
+  // Handle non-blocking menu confirmation flash
+  if (gMenuFlashActive) {
+    if (millis() - gMenuFlashStartMs >= 150) {
+      ui.setInverted(false);
+      gMenuFlashActive = false;
+    }
+  }
 
   // Handle menu button
   menu.update();

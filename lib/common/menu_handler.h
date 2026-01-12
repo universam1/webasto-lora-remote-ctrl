@@ -11,13 +11,13 @@ enum class MenuState
 
 enum class MenuItem
 {
-  QueryStatus, // Query W-BUS status
   Start,     // Start heating
   Stop,      // Stop heating
   Run10min,  // Run for 10 minutes
   Run20min,  // Run for 20 minutes
   Run30min,  // Run for 30 minutes
   Run90min,  // Run for 90 minutes
+  QueryStatus, // Query W-BUS status
   Count      // Number of menu items (sentinel)
 };
 

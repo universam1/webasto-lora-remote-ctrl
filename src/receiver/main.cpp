@@ -59,6 +59,18 @@ RTC_DATA_ATTR static uint8_t gTlvSupportCache = 0;
 static bool gTlvSupportKnown = false;
 static bool gTlvSupported = false;
 
+// Interrupt-based LoRa packet reception
+static volatile bool gLoRaPacketReceived = false;
+static proto::Packet gLastLoRaPacket{};
+static int gLastLoRaRssiLocal = 0;
+static float gLastLoRaSnrLocal = 0.0f;
+
+// ISR handler for LoRa packet reception (called from interrupt context)
+void IRAM_ATTR onLoRaPacket(int packetSize) {
+  // Just set flag - actual packet reading happens in main loop
+  gLoRaPacketReceived = true;
+}
+
 static void sendStatus(int rssiDbm, float snrDb) {
   proto::Packet pkt{};
   pkt.h.magic_version = proto::kMagicVersion;
@@ -78,9 +90,9 @@ static void sendStatus(int rssiDbm, float snrDb) {
 
 static void enterDeepSleepMs(uint32_t sleepMs) {
 #ifdef DISABLE_SLEEP
-  // Sleep disabled for testing - just delay instead
-  Serial.printf("[TEST] Sleep disabled, delaying %lu ms instead\n", sleepMs);
-  delay(sleepMs);
+  // Sleep disabled for testing - handled by interval check in main loop
+  Serial.printf("[TEST] Sleep disabled, would sleep for %lu ms\n", sleepMs);
+  return;
 #else
   // Turn radio off as best-effort.
   LoRa.sleep();
@@ -106,7 +118,7 @@ static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& 
         return true;
       }
     }
-    delay(5);
+    yield();  // Let RTOS scheduler run other tasks
   }
   return false;
 }
@@ -246,15 +258,18 @@ static void logSimpleStatusFlags(const WBusPacket& pkt, const char* label) {
   Serial.println();
 }
 
+// Global state for menu confirmation flash
+static uint32_t gMenuFlashStartMs = 0;
+static bool gMenuFlashActive = false;
+
 static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
   
-  // Brief inverted flash to confirm activation
+  // Trigger confirmation flash (handled non-blocking in main loop)
+  gMenuFlashStartMs = millis();
+  gMenuFlashActive = true;
   ui.setInverted(true);
-  ui.render();
-  delay(150);
-  ui.setInverted(false);
   
   // Clear progress bar
   ui.drawProgressBar(0, 0, 0.0f);
@@ -365,7 +380,9 @@ static void handleMenuSelection(MenuItem item)
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);  // Longer delay for serial to stabilize
+  while (!Serial && millis() < 1000) {
+    yield();  // Wait up to 1s for serial, allow RTOS tasks
+  }
 
   Serial.println("\n\n==================================");
   Serial.println("  WEBASTO LORA RECEIVER");
@@ -381,6 +398,11 @@ void setup() {
 
   bool loraOk = loraLink.begin();
   ui.setLine(1, loraOk ? "LoRa OK" : "LoRa FAIL");
+  
+  if (loraOk) {
+    loraLink.enableInterrupt();  // Enable interrupt-based reception
+    ui.setLine(1, "LoRa OK (IRQ)");
+  }
 
   bool wbusOk = wbus.begin();
   ui.setLine(2, wbusOk ? "W-BUS OK" : "W-BUS FAIL");
@@ -552,26 +574,23 @@ void loop() {
   proto::Packet pkt{};
 
 #ifdef DISABLE_SLEEP
-  // When sleep is disabled for testing, stay fully awake and continuously receive
+  // When sleep is disabled for testing, stay fully awake
+  // With interrupts enabled, no need for tight polling
   ui.setPowerSave(false);
-  
-  static bool receiveModeSet = false;
-  if (!receiveModeSet) {
-    Serial.println("[TEST] Setting LoRa to receive mode...");
-    LoRa.receive();
-    receiveModeSet = true;
-    Serial.println("[TEST] LoRa receive mode set!");
-  }
   
   static uint32_t lastDebugPrint = 0;
   if (millis() - lastDebugPrint > 5000) {
-    Serial.println("[TEST] DISABLE_SLEEP mode - continuously receiving LoRa");
+    Serial.print("[TEST] DISABLE_SLEEP mode - interrupt-based LoRa reception");
+    Serial.printf(" hasPacket=%d\n", loraLink.hasPacket() ? 1 : 0);
     lastDebugPrint = millis();
   }
   
-  // Receive LoRa packet in test/debug mode
-  if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
-    statusLed.toggle();  // Flash LED on RX
+  // Check if interrupt flagged a packet (non-blocking check)
+  if (loraLink.hasPacket()) {
+    Serial.println("[DEBUG] Packet flagged by interrupt!");
+    if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
+      statusLed.toggle();  // Flash LED on RX
+    }
   }
   
   // Don't return early - process commands below!
@@ -715,7 +734,7 @@ void loop() {
   // Do NOT poll during idle sleep wake windows to avoid waking the Webasto!
   const bool shouldPollWBus = heaterRunning || inExtendedWake || gStatusQueryRequested;
   
-  if (shouldPollWBus && (millis() - gLastPollMs > 2000)) {
+  if (shouldPollWBus && (millis() - gLastPollMs > RECEIVER_WBUS_POLL_INTERVAL_MS)) {
     gLastPollMs = millis();
     
     if (gStatusQueryRequested) {
@@ -796,6 +815,14 @@ void loop() {
 
   // Update LED blinking
   statusLed.update();
+
+  // Handle non-blocking menu confirmation flash
+  if (gMenuFlashActive) {
+    if (millis() - gMenuFlashStartMs >= 150) {
+      ui.setInverted(false);
+      gMenuFlashActive = false;
+    }
+  }
 
   // Handle menu button
   menu.update();
@@ -1019,4 +1046,7 @@ void loop() {
 
     ui.render();
   }
+  
+  // No throttling needed with interrupt-based reception
+  // CPU will sleep/idle automatically when there's nothing to do
 }
