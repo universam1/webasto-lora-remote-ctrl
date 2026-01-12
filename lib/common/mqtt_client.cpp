@@ -40,11 +40,13 @@ void MQTTClient::begin(const char* broker, uint16_t port, const char* clientId,
   password_ = password;
 
   mqtt_.setServer(broker_, port_);
+  mqtt_.setBufferSize(1024);  // Increase from default 256 bytes for discovery messages
   mqtt_.setKeepAlive(60);
   mqtt_.setSocketTimeout(5);  // 5 second socket timeout
 
   Serial.println("[MQTT] Client initialized");
   Serial.printf("[MQTT] Broker: %s:%d, Client ID: %s\n", broker_, port_, clientId_);
+  Serial.println("[MQTT] Buffer size: 1024 bytes");
 }
 
 void MQTTClient::setCommandCallback(MQTTCommandCallback callback) {
@@ -273,13 +275,17 @@ bool MQTTClient::publishDiscovery() {
   String payload;
   serializeJson(doc, payload);
   
+  Serial.printf("[MQTT] Discovery payload size: %d bytes\n", payload.length());
+  
   String topic = getDiscoveryTopic();
+  Serial.printf("[MQTT] Discovery topic: %s\n", topic.c_str());
+  
   bool result = mqtt_.publish(topic.c_str(), payload.c_str(), true);  // Retained
   
   if (result) {
     Serial.println("[MQTT] Discovery published successfully");
   } else {
-    Serial.println("[MQTT] Discovery publish failed");
+    Serial.printf("[MQTT] Discovery publish failed (payload: %d bytes, buffer: 1024 bytes)\n", payload.length());
   }
 
   return result;

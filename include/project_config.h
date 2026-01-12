@@ -228,10 +228,10 @@
 
 // WiFi connection parameters
 #ifndef MQTT_WIFI_TIMEOUT_MS
-#define MQTT_WIFI_TIMEOUT_MS 10000        // Max 10s to connect
+#define MQTT_WIFI_TIMEOUT_MS 3000        // Max 3s to connect
 #endif
 #ifndef MQTT_WIFI_RETRY_INTERVAL_MS
-#define MQTT_WIFI_RETRY_INTERVAL_MS 60000 // Retry every 60s if failed
+#define MQTT_WIFI_RETRY_INTERVAL_MS 5000 // Retry every 5s if failed
 #endif
 
 // NOTE: MQTT broker credentials are now in credentials.h (not in git)
