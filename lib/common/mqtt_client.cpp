@@ -97,9 +97,13 @@ void MQTTClient::update() {
 
 void MQTTClient::tryConnect() {
   Serial.println("[MQTT] Connecting to broker...");
+  Serial.printf("[MQTT] Broker: %s:%d\n", broker_, port_);
+  Serial.printf("[MQTT] Client ID: %s\n", clientId_);
+  Serial.printf("[MQTT] Username: %s\n", username_ && strlen(username_) > 0 ? username_ : "(none)");
 
   // Set Last Will and Testament (LWT) - announce offline on disconnect
   String lwTopic = getAvailabilityTopic();
+  Serial.printf("[MQTT] LWT topic: %s\n", lwTopic.c_str());
   
   bool connected = false;
   if (username_ && strlen(username_) > 0) {
@@ -115,7 +119,20 @@ void MQTTClient::tryConnect() {
     subscribe();
     discoveryPublished_ = false;  // Trigger republish on reconnect
   } else {
-    Serial.printf("[MQTT] Connection failed, rc=%d\n", mqtt_.state());
+    int state = mqtt_.state();
+    Serial.printf("[MQTT] Connection failed, rc=%d\n", state);
+    // Detailed error codes
+    switch(state) {
+      case -4: Serial.println("[MQTT] Error: MQTT_CONNECTION_TIMEOUT"); break;
+      case -3: Serial.println("[MQTT] Error: MQTT_CONNECTION_LOST"); break;
+      case -2: Serial.println("[MQTT] Error: MQTT_CONNECT_FAILED"); break;
+      case -1: Serial.println("[MQTT] Error: MQTT_DISCONNECTED"); break;
+      case 1: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_PROTOCOL"); break;
+      case 2: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_CLIENT_ID"); break;
+      case 3: Serial.println("[MQTT] Error: MQTT_CONNECT_UNAVAILABLE"); break;
+      case 4: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_CREDENTIALS"); break;
+      case 5: Serial.println("[MQTT] Error: MQTT_CONNECT_UNAUTHORIZED"); break;
+    }
   }
 }
 
@@ -238,7 +255,7 @@ bool MQTTClient::publishDiscovery() {
   
   // Device info
   JsonObject device = doc["device"].to<JsonObject>();
-  device["identifiers"].add("webasto_receiver_001");
+  device["identifiers"].add(MQTT_CLIENT_ID);
   device["name"] = "Webasto ThermoTop C";
   device["manufacturer"] = "Custom";
   device["model"] = "TTGO LoRa32 + W-BUS";
