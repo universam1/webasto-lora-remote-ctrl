@@ -18,7 +18,8 @@ struct MQTTCommand {
     NONE = 0,
     START,
     STOP,
-    RUN_MINUTES
+    RUN_MINUTES,
+    QUERY_STATUS
   };
   
   Type type;
@@ -114,6 +115,7 @@ private:
   String getModeCmdTopic();
   String getModeStateTopic();
   String getMinutesCmdTopic();
+  String getQueryTopic();  // Query status topic
   String getTempStateTopic();
   String getVoltageStateTopic();
   String getPowerStateTopic();

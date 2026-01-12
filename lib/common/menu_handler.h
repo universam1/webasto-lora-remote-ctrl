@@ -11,6 +11,7 @@ enum class MenuState
 
 enum class MenuItem
 {
+  QueryStatus, // Query W-BUS status
   Start,     // Start heating
   Stop,      // Stop heating
   Run10min,  // Run for 10 minutes
@@ -93,6 +94,8 @@ inline const char *menuItemToStr(MenuItem item)
     return "RUN 30min";
   case MenuItem::Run90min:
     return "RUN 90min";
+  case MenuItem::QueryStatus:
+    return "STATUS?";
   default:
     return "UNKNOWN";
   }

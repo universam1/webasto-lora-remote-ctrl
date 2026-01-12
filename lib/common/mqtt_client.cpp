@@ -120,6 +120,7 @@ void MQTTClient::tryConnect() {
 void MQTTClient::subscribe() {
   String modeTopic = getModeCmdTopic();
   String minutesTopic = getMinutesCmdTopic();
+  String queryTopic = getQueryTopic();
 
   if (mqtt_.subscribe(modeTopic.c_str())) {
     Serial.printf("[MQTT] Subscribed to: %s\n", modeTopic.c_str());
@@ -127,6 +128,10 @@ void MQTTClient::subscribe() {
 
   if (mqtt_.subscribe(minutesTopic.c_str())) {
     Serial.printf("[MQTT] Subscribed to: %s\n", minutesTopic.c_str());
+  }
+  
+  if (mqtt_.subscribe(queryTopic.c_str())) {
+    Serial.printf("[MQTT] Subscribed to: %s\n", queryTopic.c_str());
   }
   
   #ifdef MQTT_ENABLE_OTA
@@ -300,6 +305,7 @@ void MQTTClient::handleMessage(const char* topic, const byte* payload,
   String topicStr(topic);
   String modeCmdTopic = getModeCmdTopic();
   String minutesCmdTopic = getMinutesCmdTopic();
+  String queryTopic = getQueryTopic();
   
   #ifdef MQTT_ENABLE_OTA
   // Handle OTA update messages (Phase 7)
@@ -358,6 +364,11 @@ void MQTTClient::handleMessage(const char* topic, const byte* payload,
     
     cmd.type = MQTTCommand::RUN_MINUTES;
     cmd.minutes = (uint8_t)minutes;
+    cmd.timestampSec = time(nullptr);
+  } else if (topicStr == queryTopic) {
+    // Query status command: triggers W-BUS polling without starting heater
+    Serial.println("[MQTT] Query status command received");
+    cmd.type = MQTTCommand::QUERY_STATUS;
     cmd.timestampSec = time(nullptr);
   } else {
     Serial.println("[MQTT] Unknown topic");
@@ -449,6 +460,10 @@ String MQTTClient::getModeStateTopic() {
 
 String MQTTClient::getMinutesCmdTopic() {
   return String(MQTT_TOPIC_BASE) + "/minutes/set";
+}
+
+String MQTTClient::getQueryTopic() {
+  return String(MQTT_TOPIC_BASE) + "/query";
 }
 
 String MQTTClient::getTempStateTopic() {

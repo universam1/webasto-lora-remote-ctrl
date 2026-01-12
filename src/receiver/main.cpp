@@ -38,6 +38,8 @@ static proto::StatusPayload gStatus{};
 static uint32_t gLastCmdMs = 0;
 static uint32_t gLastPollMs = 0;
 static uint8_t gLastRunMinutes = DEFAULT_RUN_MINUTES;
+static uint32_t gLastHeaterOffMs = 0;  // Track when heater last turned OFF for extended wake
+static bool gStatusQueryRequested = false;  // Explicit W-BUS status query flag
 
 #ifdef ENABLE_MQTT_CONTROL
 // Phase 6: Track last command source and diagnostic publish time
@@ -342,6 +344,11 @@ static void handleMenuSelection(MenuItem item)
     }
     break;
 
+  case MenuItem::QueryStatus:
+    Serial.println("[WBUS] Menu: Query status requested");
+    gStatusQueryRequested = true;
+    break;
+
   default:
     break;
   }
@@ -420,6 +427,12 @@ void setup() {
         if (ok) {
           gStatus.state = proto::HeaterState::Running;
         }
+        break;
+        
+      case MQTTCommand::QUERY_STATUS:
+        Serial.println("[MQTT-CMD] Query status requested");
+        gStatusQueryRequested = true;
+        // No W-BUS command sent, just flag for polling in main loop
         break;
         
       default:
@@ -506,7 +519,7 @@ void loop() {
   // opening a short RX window, and then deep sleeping again.
   const bool heaterRunning = (gStatus.state == proto::HeaterState::Running);
 
-  // Update LED status only when heater state changes
+  // Update LED status and track heater state changes
   static bool lastHeaterRunning = false;
   if (heaterRunning != lastHeaterRunning) {
     lastHeaterRunning = heaterRunning;
@@ -514,8 +527,16 @@ void loop() {
       statusLed.setOn();  // Solid on while heater is running
     } else {
       statusLed.setBlink(1000);  // Slow blink while idle
+      // Track when heater turned OFF for extended wake period
+      gLastHeaterOffMs = millis();
+      Serial.println("[SLEEP] Heater turned OFF, starting extended wake period");
     }
   }
+  
+  // Check if we're in the extended wake period after heater turned off
+  const bool inExtendedWake = (!heaterRunning && 
+                               gLastHeaterOffMs != 0 && 
+                               (millis() - gLastHeaterOffMs) < RX_OFF_EXTENDED_WAKE_MS);
 
   int lastCmdRssi = 0;
   float lastCmdSnr = 0;
@@ -546,8 +567,9 @@ void loop() {
   
   // Don't return early - process commands below!
 #else
-  if (!heaterRunning) {
-    // OLED off while idle.
+  // Sleep management when DISABLE_SLEEP is not set
+  if (!heaterRunning && !inExtendedWake) {
+    // OLED off while idle and not in extended wake.
     ui.setPowerSave(true);
 
     // Short command listen window.
@@ -559,21 +581,31 @@ void loop() {
     } else {
       // No command received: go back to sleep.
       // We intentionally avoid polling W-BUS here to minimize wake-time power draw.
+      Serial.printf("[SLEEP] No command, entering sleep for %d ms\n", RX_IDLE_SLEEP_MS);
       enterDeepSleepMs(static_cast<uint32_t>(RX_IDLE_SLEEP_MS));
       return;  // Return early when sleeping to avoid falling through
     }
   } else {
-    // Running mode: keep OLED on continuously.
+    // Running mode OR extended wake: keep OLED on continuously.
     ui.setPowerSave(false);
+    
+    if (inExtendedWake && !heaterRunning) {
+      uint32_t remaining = RX_OFF_EXTENDED_WAKE_MS - (millis() - gLastHeaterOffMs);
+      static uint32_t lastExtendedWakeLog = 0;
+      if (millis() - lastExtendedWakeLog > 10000) {  // Log every 10s
+        Serial.printf("[SLEEP] Extended wake: %lu s remaining\n", remaining / 1000);
+        lastExtendedWakeLog = millis();
+      }
+    }
   }
 #endif
 
   // Receive commands (continuous in running mode, or immediately after a wake window)
   {
 #ifndef DISABLE_SLEEP
-    // Only call recv here if we're in running mode (heater on)
+    // Only call recv here if we're in running mode OR extended wake (heater recently off)
     // In idle mode with sleep enabled, recv was already done in tryReceiveCommandWindow
-    if (heaterRunning) {
+    if (heaterRunning || inExtendedWake) {
       if (loraLink.recv(pkt, lastCmdRssi, lastCmdSnr)) {
         statusLed.toggle();  // Flash LED on RX
       } else {
@@ -631,6 +663,12 @@ void loop() {
             }
             break;
 
+          case proto::CommandKind::QueryStatus:
+            Serial.println("[LORA] Query status command received");
+            gStatusQueryRequested = true;
+            // No W-BUS command sent, just flag for polling in main loop
+            break;
+
           default:
             ok = false;
             break;
@@ -659,8 +697,20 @@ void loop() {
   }
 
   // Poll W-BUS operating state periodically.
-  if (millis() - gLastPollMs > 2000) {
+  // IMPORTANT: Only poll when:
+  // 1. Heater is running (needs continuous monitoring)
+  // 2. In extended wake period (final status updates)
+  // 3. Explicit status query requested (user/MQTT/LoRa command)
+  // Do NOT poll during idle sleep wake windows to avoid waking the Webasto!
+  const bool shouldPollWBus = heaterRunning || inExtendedWake || gStatusQueryRequested;
+  
+  if (shouldPollWBus && (millis() - gLastPollMs > 2000)) {
     gLastPollMs = millis();
+    
+    if (gStatusQueryRequested) {
+      Serial.println("[WBUS] Explicit status query - polling W-BUS");
+      gStatusQueryRequested = false;  // Clear flag after polling
+    }
 
     uint8_t op = 0;
     if (wbus.readOperatingState(op)) {

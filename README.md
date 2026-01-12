@@ -7,11 +7,21 @@ Two TTGO LoRa32 SX1276 OLED boards:
 
 ## What’s implemented
 
-- LoRa P2P link using `sandeepmistry/LoRa`- **AES-128-CTR encryption** on all LoRa packets (hardware-accelerated via mbedTLS)- OLED UI using `U8g2` (SSD1306 I2C)
+- LoRa P2P link using `sandeepmistry/LoRa`
+- **AES-128-CTR encryption** on all LoRa packets (hardware-accelerated via mbedTLS)
+- OLED UI using `U8g2` (SSD1306 I2C)
+- **Interactive GPIO0 menu system** (boot button controls START/STOP/RUN/QUERY commands)
+- **Power-optimized sleep modes** with conditional W-BUS polling
 - W‑BUS framing for:
   - `0x21` **Parking heater on** (1 byte: minutes)
   - `0x10` **Shutdown**
   - `0x50` index `0x07` **Operating state read**
+  - `0x44` **Keep-alive** (maintains active session)
+- **MQTT integration** (optional, via `-DENABLE_MQTT_CONTROL` build flag):
+  - HomeAssistant autodiscovery
+  - Command topics: start, stop, run_minutes, query
+  - Status sensors: temperature, voltage, power, state, flame detection
+  - OTA firmware updates
 
 The W‑BUS packet structure and commands above come from `webasto_wbus.txt` in H4jen/webasto.
 
@@ -120,6 +130,83 @@ Open Serial Monitor at `115200` and type:
 
 Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0x07`) and sends status back over LoRa.
 
+## Power Management & Sleep Modes
+
+The receiver implements aggressive power management for battery operation.
+
+### Normal Operation (DISABLE_SLEEP=0)
+
+**Startup Sequence:**
+1. Initialize LoRa, W-BUS, WiFi/MQTT concurrently
+2. WiFi attempts connection for up to 10s (non-blocking)
+3. LoRa RX active immediately regardless of WiFi state
+4. System ready within 2-3s
+
+**Heater OFF (Idle Mode):**
+- **Sleep cycle**: Wake every 4s, listen for 400ms LoRa commands, then deep sleep
+- OLED powered off to save energy
+- WiFi/MQTT connection attempts continue in background (non-blocking)
+- W-BUS polling minimized to reduce wake time
+- **Power**: ~10mA average (vs ~150mA when fully awake)
+
+**Command Received:**
+- Any command (LoRa, MQTT, or button) wakes receiver fully
+- If command starts heater → transition to Running mode
+- If heater stays OFF → stay awake for RX window, then return to sleep
+
+**Heater RUNNING:**
+- Stay fully awake (no deep sleep)
+- OLED stays on for real-time status display
+- LoRa RX continuous for low-latency updates
+- WiFi/MQTT maintain connection for monitoring
+- W-BUS polled every 2s
+- **Power**: ~150-200mA
+
+**Heater Turns OFF → Extended Wake:**
+- **Stay awake for 60s after heater shuts down**
+- Allows final status updates to reach sender/MQTT
+- Ensures clean shutdown communication
+- W-BUS continues polling during extended wake for final status
+- After 60s: return to sleep cycle if no new commands
+
+**W-BUS Polling & Power Management:**
+- **CRITICAL**: W-BUS polling wakes the Webasto heater, drawing unnecessary power!
+- **Solution**: Only poll W-BUS when absolutely necessary:
+  - ✅ Heater is RUNNING (continuous monitoring required)
+  - ✅ In extended wake period (final status updates)
+  - ✅ Explicit `QueryStatus` command received (on-demand polling)
+  - ❌ **NOT during idle wake windows** (would wake Webasto unnecessarily)
+
+**QueryStatus Command:**
+- **Purpose**: Poll W-BUS for current status without starting the heater
+- **Use case**: Check heater temperature/voltage while idle without continuous wake
+- **Available from**:
+  - **Sender (LoRa)**: Press button → navigate to "STATUS?" → long press
+  - **MQTT**: `mosquitto_pub -h <broker> -t webasto/receiver/query -m ""`
+  - **Receiver button**: Navigate to "STATUS?" in menu
+- **Behavior**: Triggers single W-BUS poll (~250ms) → reports status → returns to sleep
+- **Power impact**: ~250ms W-BUS wake vs continuous 2s polling
+
+**Testing Mode (DISABLE_SLEEP=1):**
+- Fully awake at all times
+- W-BUS polls continuously every 2s
+- Useful for serial debugging and development
+- Set in `platformio.ini`: `-D DISABLE_SLEEP=1`
+
+### Configuration Tuning
+
+Edit `include/project_config.h`:
+```cpp
+#define RX_IDLE_LISTEN_WINDOW_MS 400   // LoRa RX window when waking
+#define RX_IDLE_SLEEP_MS 4000          // Sleep interval (heater OFF)
+#define RX_OFF_EXTENDED_WAKE_MS 60000  // Stay awake 60s after heater stops
+```
+
+**Trade-offs:**
+- Shorter `RX_IDLE_SLEEP_MS` = faster command response, higher power draw
+- Longer `RX_IDLE_LISTEN_WINDOW_MS` = higher command catch rate, more wake power
+- Extended wake ensures WiFi has time to publish final status before sleeping
+
 ## Full Round-Trip Test Results
 
 ### ✅ System Configuration
@@ -222,6 +309,48 @@ USER INPUT: "run 20" (sender serial)
 - DISABLE_SLEEP build flag enabled for continuous testing (disable for battery operation)
 - Keep-alive (0x44) and command renewal automatically handled by receiver
 - GPIO16 (OLED_RST) conflicts with standard W-BUS RX pin; receiver uses GPIO25 instead
+
+## QueryStatus Command
+
+The `QueryStatus` command triggers an on-demand W-BUS status poll **without starting the heater**. This is essential for power management: during idle sleep cycles, the receiver does NOT poll W-BUS (to avoid waking the Webasto unnecessarily). QueryStatus enables explicit status checks when needed.
+
+### Available via 3 interfaces:
+
+1. **Button Menu** (sender or receiver):
+   - Navigate to "STATUS?" item
+   - Long-press (≥800ms) to activate
+   - Single W-BUS poll → status update
+
+2. **LoRa Command** (sender to receiver):
+   - Sender transmits `CommandKind::QueryStatus` packet
+   - Receiver polls W-BUS once
+   - Status returned via LoRa
+
+3. **MQTT** (HomeAssistant or direct publish):
+   ```bash
+   mosquitto_pub -h <broker> -t webasto/receiver/query -m ""
+   ```
+   - Receiver polls W-BUS once
+   - Status published to MQTT topics
+
+### Power Impact
+- **Without QueryStatus**: Idle wake = 400ms LoRa RX only
+- **With QueryStatus**: Single 250ms W-BUS transaction on-demand
+- **Benefit**: Webasto stays asleep during idle cycles (no continuous polling)
+
+### W-BUS Polling Behavior
+
+The receiver conditionally polls W-BUS based on operational state:
+
+| State | W-BUS Polling | Reason |
+|-------|---------------|--------|
+| **Heater RUNNING** | Every 2s | Continuous monitoring required |
+| **Extended wake** (60s after OFF) | Every 2s | Final status updates |
+| **Idle wake** (LoRa RX window) | ❌ OFF | Avoid waking Webasto |
+| **Deep sleep** | ❌ OFF | Power save mode |
+| **QueryStatus requested** | Once | On-demand status check |
+
+This conditional polling prevents the receiver from waking the Webasto heater during normal idle operation, significantly reducing power consumption on both sides.
 
 ## Safety
 

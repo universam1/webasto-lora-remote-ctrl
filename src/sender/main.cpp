@@ -246,6 +246,17 @@ static void handleMenuSelection(MenuItem item)
     }
     break;
 
+  case MenuItem::QueryStatus:
+    if (sendCommandWithAck(proto::CommandKind::QueryStatus, 0))
+    {
+      Serial.println("Sent QUERY STATUS (ACKed)");
+    }
+    else
+    {
+      Serial.println("Failed to send QUERY STATUS");
+    }
+    break;
+
   default:
     break;
   }

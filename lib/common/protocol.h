@@ -27,6 +27,7 @@ enum class CommandKind : uint8_t {
   Stop = 1,
   Start = 2,
   RunMinutes = 3,
+  QueryStatus = 4,  // Request W-BUS status poll without starting heater
 };
 
 enum class HeaterState : uint8_t {

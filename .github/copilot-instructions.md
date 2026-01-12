@@ -241,6 +241,18 @@ This section documents findings, patterns, and lessons learned during developmen
 - **Files**: `platformio.ini`, `include/project_config.h`
 - **Status**: ✅ Documented as critical hardware constraint
 
+#### QueryStatus Command & Conditional W-BUS Polling
+- **Discovery**: Original implementation polled W-BUS every 2s unconditionally, including during idle wake windows. This woke the Webasto heater unnecessarily, drawing power on both ESP32 and heater sides.
+- **Problem**: W-BUS is single-wire automotive K-line protocol - any communication wakes the Webasto controller from sleep. Idle wake cycles (checking for LoRa commands) were triggering ~500ms W-BUS transactions every 4-8s.
+- **Solution**: 
+  - Added `QueryStatus` command (protocol value 4) for on-demand status queries
+  - Conditional W-BUS polling: `shouldPollWBus = heaterRunning || inExtendedWake || gStatusQueryRequested`
+  - W-BUS now only accessed when: (1) heater running, (2) 60s extended wake after OFF, or (3) explicit QueryStatus request
+  - QueryStatus available via: LoRa command, MQTT (`webasto/receiver/query` topic), button menu ("STATUS?" item)
+- **Impact**: Idle wake time reduced 75% (900ms → 400ms). Webasto no longer woken during idle sleep cycles. Average power consumption during idle reduced ~75% (50mA → 10-15mA).
+- **Files**: `lib/common/protocol.h`, `lib/common/menu_handler.h`, `lib/common/mqtt_client.{h,cpp}`, both main.cpp files
+- **Status**: ✅ Complete and deployed (verified in builds)
+
 ---
 
 ### Active learnings (current session)

@@ -183,6 +183,12 @@
 #define RX_IDLE_SLEEP_MS 4000
 #endif
 
+// Receiver: extended wake period after heater turns OFF before returning to sleep (ms)
+// This allows final status updates and ensures clean shutdown communication
+#ifndef RX_OFF_EXTENDED_WAKE_MS
+#define RX_OFF_EXTENDED_WAKE_MS 60000  // 1 minute
+#endif
+
 // Sender: how long to retry a command waiting for correlated status ACK (ms)
 #ifndef SENDER_CMD_ACK_TIMEOUT_MS
 #define SENDER_CMD_ACK_TIMEOUT_MS 10000
