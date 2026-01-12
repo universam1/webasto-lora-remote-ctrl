@@ -174,6 +174,19 @@ static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
 
+  // Flash display for visual feedback
+  for (int i = 0; i < 3; i++) {
+    ui.setInverted(true);
+    ui.render();
+    delay(100);
+    ui.setInverted(false);
+    ui.render();
+    delay(100);
+  }
+
+  // Hide menu and return to status view
+  menu.hide();
+
   switch (item)
   {
   case MenuItem::Start:
@@ -425,25 +438,46 @@ void loop()
     // Check if menu is visible
     if (menu.getState() == MenuState::Visible)
     {
-      // Render menu
-      ui.setLine(0, "=== MENU ===");
-      ui.setLine(1, "");
+      // Render menu with pagination
       MenuItem selected = menu.getSelectedItem();
-      for (int i = 0; i < static_cast<int>(MenuItem::Count); i++)
+      int selectedIdx = static_cast<int>(selected);
+      int totalItems = static_cast<int>(MenuItem::Count);
+      
+      // Calculate pagination: 4 visible lines (lines 1-4), line 5 for page indicator
+      const int visibleItems = 4;
+      int page = selectedIdx / visibleItems;
+      int totalPages = (totalItems + visibleItems - 1) / visibleItems;
+      int startIdx = page * visibleItems;
+      int endIdx = min(startIdx + visibleItems, totalItems);
+      
+      ui.setLine(0, "=== MENU === (long press)");
+      
+      // Render visible menu items
+      for (int i = 0; i < visibleItems; i++)
       {
-        MenuItem item = static_cast<MenuItem>(i);
-        String line;
-        if (item == selected)
+        int itemIdx = startIdx + i;
+        if (itemIdx < totalItems)
         {
-          line = "> " + String(menuItemToStr(item));
+          MenuItem item = static_cast<MenuItem>(itemIdx);
+          String line;
+          if (item == selected)
+          {
+            line = "> " + String(menuItemToStr(item));
+          }
+          else
+          {
+            line = "  " + String(menuItemToStr(item));
+          }
+          ui.setLine(1 + i, line);
         }
         else
         {
-          line = "  " + String(menuItemToStr(item));
+          ui.setLine(1 + i, "");
         }
-        ui.setLine(2 + i, line);
       }
-      ui.setLine(5, "Long press to activate");
+      
+      // Page indicator on line 5
+      ui.setLine(5, String("Page ") + String(page + 1) + "/" + String(totalPages));
     }
     else
     {

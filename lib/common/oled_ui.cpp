@@ -24,9 +24,25 @@ void OledUi::setLine(uint8_t idx, const String& text) {
 
 void OledUi::render() {
   u8g2.clearBuffer();
+  
+  if (isInverted) {
+    // Draw inverted: fill screen with white, draw text in black
+    u8g2.setDrawColor(1);
+    u8g2.drawBox(0, 0, 128, 64);
+    u8g2.setDrawColor(0);
+  } else {
+    u8g2.setDrawColor(1);
+  }
+  
   for (uint8_t i = 0; i < 6; i++) {
     if (lines[i].length() == 0) continue;
     u8g2.drawStr(0, i * 11, lines[i].c_str());
   }
+  
+  u8g2.setDrawColor(1);  // Reset to normal
   u8g2.sendBuffer();
+}
+
+void OledUi::setInverted(bool inverted) {
+  isInverted = inverted;
 }
