@@ -8,11 +8,13 @@
 #include "status_led.h"
 #include "wbus_simple.h"
 #include "encryption.h"
+#include "menu_handler.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
 static StatusLed statusLed;
 static WBusSimple wbus(Serial2);
+static MenuHandler menu;
 
 static uint16_t gSeq = 1;
 static proto::StatusPayload gStatus{};
@@ -217,6 +219,105 @@ static void logSimpleStatusFlags(const WBusPacket& pkt, const char* label) {
   Serial.println();
 }
 
+static void handleMenuSelection(MenuItem item)
+{
+  Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
+
+  switch (item)
+  {
+  case MenuItem::Start:
+    Serial.printf("[WBUS] Menu: Sending START for %d min\n", gLastRunMinutes);
+    if (wbus.startParkingHeater(gLastRunMinutes))
+    {
+      gStatus.state = proto::HeaterState::Running;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu START OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu START FAILED");
+    }
+    break;
+
+  case MenuItem::Stop:
+    Serial.println("[WBUS] Menu: Sending STOP");
+    if (wbus.stop())
+    {
+      gStatus.state = proto::HeaterState::Off;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu STOP OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu STOP FAILED");
+    }
+    break;
+
+  case MenuItem::Run10min:
+    gLastRunMinutes = 10;
+    Serial.printf("[WBUS] Menu: Sending RUN for 10 min\n");
+    if (wbus.startParkingHeater(gLastRunMinutes))
+    {
+      gStatus.state = proto::HeaterState::Running;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu RUN 10 OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu RUN 10 FAILED");
+    }
+    break;
+
+  case MenuItem::Run20min:
+    gLastRunMinutes = 20;
+    Serial.printf("[WBUS] Menu: Sending RUN for 20 min\n");
+    if (wbus.startParkingHeater(gLastRunMinutes))
+    {
+      gStatus.state = proto::HeaterState::Running;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu RUN 20 OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu RUN 20 FAILED");
+    }
+    break;
+
+  case MenuItem::Run30min:
+    gLastRunMinutes = 30;
+    Serial.printf("[WBUS] Menu: Sending RUN for 30 min\n");
+    if (wbus.startParkingHeater(gLastRunMinutes))
+    {
+      gStatus.state = proto::HeaterState::Running;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu RUN 30 OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu RUN 30 FAILED");
+    }
+    break;
+
+  case MenuItem::Run90min:
+    gLastRunMinutes = 90;
+    Serial.printf("[WBUS] Menu: Sending RUN for 90 min\n");
+    if (wbus.startParkingHeater(gLastRunMinutes))
+    {
+      gStatus.state = proto::HeaterState::Running;
+      gLastCmdMs = millis();
+      Serial.println("[WBUS] Menu RUN 90 OK");
+    }
+    else
+    {
+      Serial.println("[WBUS] Menu RUN 90 FAILED");
+    }
+    break;
+
+  default:
+    break;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);  // Longer delay for serial to stabilize
@@ -245,6 +346,10 @@ void setup() {
   // Initialize encryption with default PSK
   crypto::AES128CTR::setKey(proto::kDefaultPSK);
   Serial.println("[SETUP] AES-128-CTR encryption initialized");
+
+  // Initialize button/menu on GPIO0
+  menu.begin(MENU_BUTTON_PIN);
+  Serial.println("[SETUP] Menu button initialized on GPIO0");
 
   Serial.println("Receiver ready.");
 
@@ -502,56 +607,94 @@ void loop() {
   // Update LED blinking
   statusLed.update();
 
+  // Handle menu button
+  menu.update();
+
+  // Check if menu item was activated (long press)
+  MenuItem activatedItem;
+  if (menu.isItemActivated(activatedItem))
+  {
+    handleMenuSelection(activatedItem);
+  }
+
   // OLED refresh
   static uint32_t lastUiMs = 0;
   if (millis() - lastUiMs > 250) {
     lastUiMs = millis();
 
-    ui.setLine(0, "Webasto LoRa Receiver");
-    ui.setLine(1,
-               String("State: ") +
-                   (gStatus.state == proto::HeaterState::Running
-                        ? "RUN"
-                        : (gStatus.state == proto::HeaterState::Off
-                               ? "OFF"
-                               : (gStatus.state == proto::HeaterState::Error ? "ERR" : "UNK"))));
-    ui.setLine(2, String("Last min: ") + String(gLastRunMinutes));
-    ui.setLine(3, String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX));
+    // Check if menu is visible
+    if (menu.getState() == MenuState::Visible)
+    {
+      // Render menu
+      ui.setLine(0, "=== MENU ===");
+      ui.setLine(1, "");
+      MenuItem selected = menu.getSelectedItem();
+      for (int i = 0; i < static_cast<int>(MenuItem::Count); i++)
+      {
+        MenuItem item = static_cast<MenuItem>(i);
+        String line;
+        if (item == selected)
+        {
+          line = "> " + String(menuItemToStr(item));
+        }
+        else
+        {
+          line = "  " + String(menuItemToStr(item));
+        }
+        ui.setLine(2 + i, line);
+      }
+      ui.setLine(5, "Long press to activate");
+    }
+    else
+    {
+      // Render normal status view
+      ui.setLine(0, "Webasto LoRa Receiver");
+      ui.setLine(1,
+                 String("State: ") +
+                     (gStatus.state == proto::HeaterState::Running
+                          ? "RUN"
+                          : (gStatus.state == proto::HeaterState::Off
+                                 ? "OFF"
+                                 : (gStatus.state == proto::HeaterState::Error ? "ERR" : "UNK"))));
+      ui.setLine(2, String("Last min: ") + String(gLastRunMinutes));
+      ui.setLine(3, String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX));
 
-    if (gLastCmdMs == 0) {
-      ui.setLine(4, "Last cmd: (none)");
-    } else {
-      ui.setLine(4, String("Last cmd: ") + String((millis() - gLastCmdMs) / 1000) + "s");
+      if (gLastCmdMs == 0) {
+        ui.setLine(4, "Last cmd: (none)");
+      } else {
+        ui.setLine(4, String("Last cmd: ") + String((millis() - gLastCmdMs) / 1000) + "s");
+      }
+
+      // Cycle through W-BUS status fields on line 5 every 3 seconds
+      static uint32_t lastStatusCycleMs = 0;
+      static uint8_t statusCycleIndex = 0;
+      
+      if (millis() - lastStatusCycleMs > 3000) {
+        lastStatusCycleMs = millis();
+        statusCycleIndex = (statusCycleIndex + 1) % 4;
+      }
+      
+      String statusLine;
+      switch (statusCycleIndex) {
+        case 0:  // Temperature
+          statusLine = String("Temp: ") + String(gStatus.temperatureC) + "C";
+          break;
+        case 1:  // Voltage
+          statusLine = String("Volt: ") + String(gStatus.voltage_mV) + "mV";
+          break;
+        case 2:  // Heater power
+          statusLine = String("Power: ") + String(gStatus.power);
+          break;
+        case 3:  // Operating state
+          statusLine = String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX);
+          break;
+        default:
+          statusLine = "WBUS 2400 8E1";
+      }
+      
+      ui.setLine(5, statusLine);
     }
 
-    // Cycle through W-BUS status fields on line 5 every 3 seconds
-    static uint32_t lastStatusCycleMs = 0;
-    static uint8_t statusCycleIndex = 0;
-    
-    if (millis() - lastStatusCycleMs > 3000) {
-      lastStatusCycleMs = millis();
-      statusCycleIndex = (statusCycleIndex + 1) % 4;
-    }
-    
-    String statusLine;
-    switch (statusCycleIndex) {
-      case 0:  // Temperature
-        statusLine = String("Temp: ") + String(gStatus.temperatureC) + "C";
-        break;
-      case 1:  // Voltage
-        statusLine = String("Volt: ") + String(gStatus.voltage_mV) + "mV";
-        break;
-      case 2:  // Heater power
-        statusLine = String("Power: ") + String(gStatus.power);
-        break;
-      case 3:  // Operating state
-        statusLine = String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX);
-        break;
-      default:
-        statusLine = "WBUS 2400 8E1";
-    }
-    
-    ui.setLine(5, statusLine);
     ui.render();
   }
 }

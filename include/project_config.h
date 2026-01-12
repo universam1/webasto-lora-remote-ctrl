@@ -46,6 +46,11 @@
 #define STATUS_LED_PIN LED_BUILTIN
 #endif
 
+// Menu Button (GPIO0 on TTGO LoRa32-OLED V1.0)
+#ifndef MENU_BUTTON_PIN
+#define MENU_BUTTON_PIN GPIO_NUM_0
+#endif
+
 // -------------------------
 // LoRa radio configuration
 // -------------------------

@@ -6,10 +6,12 @@
 #include "protocol.h"
 #include "status_led.h"
 #include "encryption.h"
+#include "menu_handler.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
 static StatusLed statusLed;
+static MenuHandler menu;
 
 static uint16_t gSeq = 1;
 static uint8_t gLastMinutes = DEFAULT_RUN_MINUTES;
@@ -168,6 +170,87 @@ static String formatMeasurements(const proto::StatusPayload &st)
   return out;
 }
 
+static void handleMenuSelection(MenuItem item)
+{
+  Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
+
+  switch (item)
+  {
+  case MenuItem::Start:
+    if (sendCommandWithAck(proto::CommandKind::Start, gLastMinutes))
+    {
+      Serial.printf("Sent START (%u min, ACKed)\n", gLastMinutes);
+    }
+    else
+    {
+      Serial.println("Failed to send START");
+    }
+    break;
+
+  case MenuItem::Stop:
+    if (sendCommandWithAck(proto::CommandKind::Stop, 0))
+    {
+      Serial.println("Sent STOP (ACKed)");
+    }
+    else
+    {
+      Serial.println("Failed to send STOP");
+    }
+    break;
+
+  case MenuItem::Run10min:
+    gLastMinutes = 10;
+    if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes))
+    {
+      Serial.printf("Sent RUN (10 min, ACKed)\n");
+    }
+    else
+    {
+      Serial.println("Failed to send RUN");
+    }
+    break;
+
+  case MenuItem::Run20min:
+    gLastMinutes = 20;
+    if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes))
+    {
+      Serial.printf("Sent RUN (20 min, ACKed)\n");
+    }
+    else
+    {
+      Serial.println("Failed to send RUN");
+    }
+    break;
+
+  case MenuItem::Run30min:
+    gLastMinutes = 30;
+    if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes))
+    {
+      Serial.printf("Sent RUN (30 min, ACKed)\n");
+    }
+    else
+    {
+      Serial.println("Failed to send RUN");
+    }
+    break;
+
+  case MenuItem::Run90min:
+    gLastMinutes = 90;
+    if (sendCommandWithAck(proto::CommandKind::RunMinutes, gLastMinutes))
+    {
+      Serial.printf("Sent RUN (90 min, ACKed)\n");
+    }
+    else
+    {
+      Serial.println("Failed to send RUN");
+    }
+    break;
+
+  default:
+    break;
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -196,6 +279,10 @@ void setup()
   // Initialize encryption with default PSK
   crypto::AES128CTR::setKey(proto::kDefaultPSK);
   Serial.println("[SETUP] AES-128-CTR encryption initialized");
+
+  // Initialize button/menu on GPIO0
+  menu.begin(MENU_BUTTON_PIN);
+  Serial.println("[SETUP] Menu button initialized on GPIO0");
 
   Serial.println("Sender ready. Commands: start | stop | run <minutes>");
 
@@ -290,6 +377,16 @@ void loop()
   // Update LED
   statusLed.update();
 
+  // Handle menu button
+  menu.update();
+
+  // Check if menu item was activated (long press)
+  MenuItem activatedItem;
+  if (menu.isItemActivated(activatedItem))
+  {
+    handleMenuSelection(activatedItem);
+  }
+
   // Update battery voltage periodically
   if (millis() - gLastBattUpdateMs > VBAT_UPDATE_INTERVAL_MS)
   {
@@ -314,35 +411,63 @@ void loop()
   {
     lastUiMs = millis();
 
-    ui.setLine(0, "Webasto LoRa Sender");
-    ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min Bat:" + String(gBattV, 2) + "V");
-
-    if (gLastStatusRxMs == 0)
+    // Check if menu is visible
+    if (menu.getState() == MenuState::Visible)
     {
-      ui.setLine(2, "Status: (none)");
-      ui.setLine(3, "");
-      ui.setLine(4, "");
+      // Render menu
+      ui.setLine(0, "=== MENU ===");
+      ui.setLine(1, "");
+      MenuItem selected = menu.getSelectedItem();
+      for (int i = 0; i < static_cast<int>(MenuItem::Count); i++)
+      {
+        MenuItem item = static_cast<MenuItem>(i);
+        String line;
+        if (item == selected)
+        {
+          line = "> " + String(menuItemToStr(item));
+        }
+        else
+        {
+          line = "  " + String(menuItemToStr(item));
+        }
+        ui.setLine(2 + i, line);
+      }
+      ui.setLine(5, "Long press to activate");
     }
     else
     {
-      uint32_t age = (millis() - gLastStatusRxMs) / 1000;
-      ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age:" + String(age) + "s");
-      ui.setLine(3, formatMeasurements(gLastStatus));
-      ui.setLine(4,
-                 String("RSSI:" + String(gLastStatus.lastRssiDbm) +
-                     " SNR:" + String(gLastStatus.lastSnrDb) + "dB"));
+      // Render normal status view
+      ui.setLine(0, "Webasto LoRa Sender");
+      ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min Bat:" + String(gBattV, 2) + "V");
+
+      if (gLastStatusRxMs == 0)
+      {
+        ui.setLine(2, "Status: (none)");
+        ui.setLine(3, "");
+        ui.setLine(4, "");
+      }
+      else
+      {
+        uint32_t age = (millis() - gLastStatusRxMs) / 1000;
+        ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age:" + String(age) + "s");
+        ui.setLine(3, formatMeasurements(gLastStatus));
+        ui.setLine(4,
+                   String("RSSI:" + String(gLastStatus.lastRssiDbm) +
+                       " SNR:" + String(gLastStatus.lastSnrDb) + "dB"));
+      }
+
+      if (gAwaitingCmdSeq != 0)
+      {
+        ui.setLine(5, String("Waiting ACK ") + String(gAwaitingCmdSeq));
+      }
+      else
+      {
+        // ui.setLine(5, "Serial: start/stop/run");
+        // show useful info instead
+        ui.setLine(5, String("Last CmdSeq: ") + String(gLastStatus.lastCmdSeq));
+      }
     }
 
-    if (gAwaitingCmdSeq != 0)
-    {
-      ui.setLine(5, String("Waiting ACK ") + String(gAwaitingCmdSeq));
-    }
-    else
-    {
-      // ui.setLine(5, "Serial: start/stop/run");
-      // show useful info instead
-      ui.setLine(5, String("Last CmdSeq: ") + String(gLastStatus.lastCmdSeq));
-    }
     ui.render();
   }
 }
