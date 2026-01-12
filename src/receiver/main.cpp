@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <esp_sleep.h>
+#include <time.h>
 
 #include "project_config.h"
 #include "lora_link.h"
@@ -10,17 +11,41 @@
 #include "encryption.h"
 #include "menu_handler.h"
 
+#ifdef ENABLE_MQTT_CONTROL
+#include "wifi_manager.h"
+#include "mqtt_client.h"
+#ifdef MQTT_ENABLE_OTA
+#include "ota_updater.h"
+#endif
+#endif
+
 static OledUi ui;
 static LoRaLink loraLink;
 static StatusLed statusLed;
 static WBusSimple wbus(Serial2);
 static MenuHandler menu;
 
+#ifdef ENABLE_MQTT_CONTROL
+static WiFiManager wifiMgr;
+static MQTTClient mqttClient(wifiMgr);
+#ifdef MQTT_ENABLE_OTA
+static OTAUpdater otaUpdater;
+#endif
+#endif
+
 static uint16_t gSeq = 1;
 static proto::StatusPayload gStatus{};
 static uint32_t gLastCmdMs = 0;
 static uint32_t gLastPollMs = 0;
 static uint8_t gLastRunMinutes = DEFAULT_RUN_MINUTES;
+
+#ifdef ENABLE_MQTT_CONTROL
+// Phase 6: Track last command source and diagnostic publish time
+static const char* gLastCommandSource = "none";
+static uint32_t gLastDiagnosticPublishMs = 0;
+static int gLastLoRaRssi = -157;
+static float gLastLoRaSNR = -20.0f;
+#endif
 
 // Persist across deep sleep to deduplicate sender retries.
 RTC_DATA_ATTR static uint16_t gLastProcessedCmdSeq = 0;
@@ -222,6 +247,10 @@ static void logSimpleStatusFlags(const WBusPacket& pkt, const char* label) {
 static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
+  
+  #ifdef ENABLE_MQTT_CONTROL
+  gLastCommandSource = "button";  // Phase 6: Track command source
+  #endif
 
   switch (item)
   {
@@ -350,6 +379,98 @@ void setup() {
   // Initialize button/menu on GPIO0
   menu.begin(MENU_BUTTON_PIN);
   Serial.println("[SETUP] Menu button initialized on GPIO0");
+
+#ifdef ENABLE_MQTT_CONTROL
+  // Initialize WiFi and MQTT
+  ui.setLine(4, "Init WiFi...");
+  ui.render();
+  
+  wifiMgr.begin(MQTT_WIFI_SSID, MQTT_WIFI_USERNAME, MQTT_WIFI_PASSWORD, MQTT_WIFI_ANONYMOUS_ID);
+  mqttClient.begin(MQTT_BROKER, MQTT_PORT, MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD);
+  
+  // Set MQTT command callback
+  mqttClient.setCommandCallback([](const MQTTCommand& cmd) {
+    Serial.printf("[MQTT] Command callback: type=%d minutes=%d\n", cmd.type, cmd.minutes);
+    
+    gLastCommandSource = "mqtt";  // Phase 6: Track command source
+    
+    bool ok = true;
+    switch (cmd.type) {
+      case MQTTCommand::STOP:
+        Serial.println("[MQTT-CMD] Executing STOP");
+        ok = wbus.stop();
+        if (ok) {
+          gStatus.state = proto::HeaterState::Off;
+        }
+        break;
+        
+      case MQTTCommand::START:
+        Serial.printf("[MQTT-CMD] Executing START (%d min)\n", cmd.minutes);
+        gLastRunMinutes = cmd.minutes ? cmd.minutes : gLastRunMinutes;
+        ok = wbus.startParkingHeater(gLastRunMinutes);
+        if (ok) {
+          gStatus.state = proto::HeaterState::Running;
+        }
+        break;
+        
+      case MQTTCommand::RUN_MINUTES:
+        Serial.printf("[MQTT-CMD] Executing RUN (%d min)\n", cmd.minutes);
+        gLastRunMinutes = cmd.minutes;
+        ok = wbus.startParkingHeater(gLastRunMinutes);
+        if (ok) {
+          gStatus.state = proto::HeaterState::Running;
+        }
+        break;
+        
+      default:
+        ok = false;
+        break;
+    }
+    
+    if (!ok) {
+      gStatus.state = proto::HeaterState::Error;
+    }
+    
+    gLastCmdMs = millis();
+    
+    // Publish updated state immediately (Phase 6: Include diagnostic data)
+    if (mqttClient.isConnected()) {
+      mqttClient.publishStatus(gStatus);
+      #ifdef MQTT_ENABLE_DIAGNOSTIC_SENSORS
+      mqttClient.publishLastCommandSource(gLastCommandSource);
+      #endif
+    }
+  });
+  
+  #ifdef MQTT_ENABLE_OTA
+  // Register OTA updater with MQTT client (Phase 7)
+  mqttClient.setOTAUpdater(&otaUpdater);
+  
+  // Set OTA callbacks
+  otaUpdater.setProgressCallback([](size_t current, size_t total) {
+    uint8_t percent = (current * 100) / total;
+    Serial.printf("[OTA] Progress: %u%%\n", percent);
+    ui.setLine(0, "OTA Update");
+    ui.setLine(1, String(percent) + "% complete");
+    ui.render();
+  });
+  
+  otaUpdater.setCompleteCallback([](OTAResult result, const char* message) {
+    Serial.printf("[OTA] Complete: result=%d message=%s\n", (int)result, message);
+    mqttClient.publishOTAStatus(
+      result == OTAResult::SUCCESS ? "success" : "failed",
+      message
+    );
+  });
+  #endif
+  
+  // Configure NTP for timestamp validation
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.println("[SETUP] NTP time sync configured");
+  
+  ui.setLine(4, "WiFi configured");
+  ui.render();
+#endif
 
   Serial.println("Receiver ready.");
 
@@ -519,9 +640,17 @@ void loop() {
         if (!ok) {
           gStatus.state = proto::HeaterState::Error;
         }
+        
+        gLastCommandSource = "lora";  // Phase 6: Track command source
 
         gLastProcessedCmdSeq = pkt.h.seq;
         gStatus.lastCmdSeq = gLastProcessedCmdSeq;
+        
+        // Store LoRa metrics for diagnostic publishing (Phase 6)
+        #ifdef ENABLE_MQTT_CONTROL
+        gLastLoRaRssi = lastCmdRssi;
+        gLastLoRaSNR = lastCmdSnr;
+        #endif
 
         // Send immediate status update as ACK.
         sendStatus(lastCmdRssi, lastCmdSnr);
@@ -617,6 +746,90 @@ void loop() {
     handleMenuSelection(activatedItem);
   }
 
+#ifdef ENABLE_MQTT_CONTROL
+  // Update WiFi and MQTT (non-blocking)
+  wifiMgr.update();
+  
+  if (wifiMgr.isConnected()) {
+    mqttClient.update();
+    
+    // Phase 7: Handle OTA update requests
+    #ifdef MQTT_ENABLE_OTA
+    if (otaUpdater.isUpdateRequested()) {
+      if (otaUpdater.canUpdate(heaterRunning)) {
+        Serial.println("[OTA] Performing OTA update...");
+        mqttClient.publishOTAStatus("starting", "Beginning OTA update");
+        
+        // Read credentials from template or use defaults
+        #ifdef OTA_UPDATE_URL
+        const char* url = OTA_UPDATE_URL;
+        #else
+        const char* url = "";
+        #endif
+        
+        #ifdef OTA_UPDATE_USERNAME
+        const char* username = OTA_UPDATE_USERNAME;
+        #else
+        const char* username = "";
+        #endif
+        
+        #ifdef OTA_UPDATE_PASSWORD
+        const char* password = OTA_UPDATE_PASSWORD;
+        #else
+        const char* password = "";
+        #endif
+        
+        if (strlen(url) > 0) {
+          OTAResult result = otaUpdater.performUpdate(url, username, password);
+          // If we reach here, update failed (success would have rebooted)
+          if (result != OTAResult::SUCCESS) {
+            Serial.printf("[OTA] Update failed: %s\n", otaUpdater.getLastError());
+          }
+        } else {
+          Serial.println("[OTA] No URL configured");
+          mqttClient.publishOTAStatus("error", "No OTA URL configured");
+        }
+        
+        otaUpdater.clearUpdateRequest();
+      } else {
+        if (heaterRunning) {
+          Serial.println("[OTA] Cannot update while heater is running");
+          mqttClient.publishOTAStatus("deferred", "Heater must be OFF for OTA");
+        } else {
+          Serial.println("[OTA] Cannot update - WiFi not connected");
+          mqttClient.publishOTAStatus("error", "WiFi required for OTA");
+        }
+        otaUpdater.clearUpdateRequest();
+      }
+    }
+    #endif
+    
+    // Publish status updates periodically
+    static uint32_t lastMqttPublishMs = 0;
+    if (millis() - lastMqttPublishMs > MQTT_STATUS_INTERVAL_MS) {
+      lastMqttPublishMs = millis();
+      
+      if (mqttClient.isConnected()) {
+        mqttClient.publishStatus(gStatus);
+        Serial.println("[MQTT] Status published");
+      }
+    }
+    
+    // Phase 6: Publish diagnostic sensors periodically
+    #ifdef MQTT_ENABLE_DIAGNOSTIC_SENSORS
+    if (millis() - gLastDiagnosticPublishMs > MQTT_DIAGNOSTIC_INTERVAL_MS) {
+      gLastDiagnosticPublishMs = millis();
+      
+      if (mqttClient.isConnected()) {
+        bool wbusHealthy = (gStatus.state != proto::HeaterState::Error);
+        mqttClient.publishDiagnostics(gLastLoRaRssi, gLastLoRaSNR, gLastCommandSource, wbusHealthy);
+        Serial.println("[MQTT] Diagnostics published");
+      }
+    }
+    #endif
+  }
+#endif
+
   // OLED refresh
   static uint32_t lastUiMs = 0;
   if (millis() - lastUiMs > 250) {
@@ -671,7 +884,11 @@ void loop() {
       
       if (millis() - lastStatusCycleMs > 3000) {
         lastStatusCycleMs = millis();
-        statusCycleIndex = (statusCycleIndex + 1) % 4;
+#ifdef ENABLE_MQTT_CONTROL
+        statusCycleIndex = (statusCycleIndex + 1) % 5;  // 5 items with WiFi/MQTT
+#else
+        statusCycleIndex = (statusCycleIndex + 1) % 4;  // 4 items without
+#endif
       }
       
       String statusLine;
@@ -688,6 +905,19 @@ void loop() {
         case 3:  // Operating state
           statusLine = String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX);
           break;
+#ifdef ENABLE_MQTT_CONTROL
+        case 4:  // WiFi/MQTT status
+          if (wifiMgr.isConnected()) {
+            if (mqttClient.isConnected()) {
+              statusLine = "WiFi+MQTT OK";
+            } else {
+              statusLine = "WiFi OK, MQTT...";
+            }
+          } else {
+            statusLine = "WiFi: connecting";
+          }
+          break;
+#endif
         default:
           statusLine = "WBUS 2400 8E1";
       }

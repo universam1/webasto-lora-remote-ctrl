@@ -200,3 +200,83 @@
 #ifndef LORA_NODE_RECEIVER
 #define LORA_NODE_RECEIVER 2
 #endif
+
+// ============================================================================
+// MQTT/HomeAssistant Configuration
+// ============================================================================
+
+// Feature flag - disable MQTT completely if not needed
+// Comment out to disable MQTT support
+#define ENABLE_MQTT_CONTROL
+
+#ifdef ENABLE_MQTT_CONTROL
+
+// WiFi & MQTT credentials - Include from separate file (not in git)
+// Copy include/credentials.h.template to include/credentials.h and fill in your credentials
+#include "credentials.h"
+
+// WiFi connection parameters
+#ifndef MQTT_WIFI_TIMEOUT_MS
+#define MQTT_WIFI_TIMEOUT_MS 10000        // Max 10s to connect
+#endif
+#ifndef MQTT_WIFI_RETRY_INTERVAL_MS
+#define MQTT_WIFI_RETRY_INTERVAL_MS 60000 // Retry every 60s if failed
+#endif
+
+// NOTE: MQTT broker credentials are now in credentials.h (not in git)
+
+// MQTT topics
+#ifndef MQTT_TOPIC_BASE
+#define MQTT_TOPIC_BASE "webasto/receiver"
+#endif
+#ifndef MQTT_DISCOVERY_PREFIX
+#define MQTT_DISCOVERY_PREFIX "homeassistant"
+#endif
+
+// Command validation
+#ifndef MQTT_CMD_MAX_AGE_SEC
+#define MQTT_CMD_MAX_AGE_SEC 3600  // Reject commands older than 1 hour
+#endif
+
+// Status publishing interval
+#ifndef MQTT_STATUS_INTERVAL_MS
+#define MQTT_STATUS_INTERVAL_MS 30000  // Publish status every 30s
+#endif
+
+// ============================================================================
+// Phase 6: Additional Diagnostic Sensors
+// ============================================================================
+
+// Enable/disable diagnostic sensors (comment out to disable)
+#define MQTT_ENABLE_DIAGNOSTIC_SENSORS
+
+// Diagnostic sensor publishing interval (less frequent than status)
+#ifndef MQTT_DIAGNOSTIC_INTERVAL_MS
+#define MQTT_DIAGNOSTIC_INTERVAL_MS 60000  // Publish diagnostics every 60s
+#endif
+
+// ============================================================================
+// Phase 7: OTA Updates
+// ============================================================================
+
+// Enable/disable OTA updates (comment out to disable)
+#define MQTT_ENABLE_OTA
+
+#ifdef MQTT_ENABLE_OTA
+// OTA check interval (check for updates every 6 hours)
+#ifndef OTA_CHECK_INTERVAL_MS
+#define OTA_CHECK_INTERVAL_MS 21600000  // 6 hours
+#endif
+
+// OTA topic for triggering updates
+#ifndef OTA_UPDATE_TOPIC
+#define OTA_UPDATE_TOPIC "webasto/receiver/ota/update"
+#endif
+
+// OTA status topic
+#ifndef OTA_STATUS_TOPIC
+#define OTA_STATUS_TOPIC "webasto/receiver/ota/status"
+#endif
+#endif // MQTT_ENABLE_OTA
+
+#endif // ENABLE_MQTT_CONTROL

@@ -1,6 +1,17 @@
-# TTGO LoRa32-OLED V1.0 pin mapping (SX1276/SX1278 + SSD1306)
+---
+name: ttgo-lora32-oled
+description: Hardware pin mapping for TTGO LoRa32-OLED V1.0 board (ESP32 + SX1276/SX1278 + SSD1306 OLED). Use when configuring LoRa SPI pins, OLED I2C pins, or verifying hardware connections for this specific board.
+compatibility: TTGO LoRa32-OLED V1.0 hardware only (433MHz variant)
+metadata:
+  author: webastolora
+  board: ttgo-lora32-v1
+  chip: SX1276/SX1278
+  display: SSD1306 128x64 I2C
+---
 
-This repo targets the **TTGO LoRa32-OLED V1.0** (ESP32 + SX1276/SX1278 + 0.96" SSD1306 I2C OLED).
+# TTGO LoRa32-OLED V1.0 Pin Mapping
+
+Hardware configuration for TTGO LoRa32-OLED V1.0 board (ESP32 + SX1276/SX1278 LoRa + 0.96" SSD1306 I2C OLED).
 
 ## Source
 

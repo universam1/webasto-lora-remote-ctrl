@@ -2,3 +2,6 @@
 .pioenvs
 .piolibdeps
 *.pyc
+
+# Credentials (never commit these!)
+include/credentials.h

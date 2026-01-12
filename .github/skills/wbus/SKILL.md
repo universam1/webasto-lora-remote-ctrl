@@ -1,7 +1,16 @@
-# W‑BUS notes (what we’ve learned so far)
+---
+name: wbus
+description: Webasto W-BUS protocol implementation for ESP32. Single-wire automotive K-line style communication at 2400 baud 8E1. Use when interfacing with Webasto heaters, implementing W-BUS commands, or debugging heater communication.
+compatibility: Requires W-BUS transceiver hardware (K-line or MC33290/MC33660-class) for ESP32 UART to 12V bus level shifting
+metadata:
+  author: webastolora
+  protocol: W-BUS
+  baud: 2400
+---
 
-This repository talks to a Webasto heater over **W‑BUS** from an ESP32.
-This document captures the practical protocol details we’ve used/observed while implementing `WBusSimple`.
+# W‑BUS Protocol Implementation Notes
+
+This document captures practical W-BUS protocol details for controlling Webasto heaters from ESP32 via the `WBusSimple` implementation.
 
 ## Big picture
 

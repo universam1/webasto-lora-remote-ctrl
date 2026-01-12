@@ -1,6 +1,16 @@
-# LoRa Protocol Skill: webastolora v4
+---
+name: protocol
+description: LoRa packet protocol v4 for webastolora project. Variable-length packets, AES-128-CTR encryption, smart sensor quantization. Use when implementing LoRa communication between sender and receiver, optimizing airtime, or debugging packet structure.
+metadata:
+  author: webastolora
+  version: "4"
+  packet-size: 17-21 bytes
+  airtime: 5.4ms at SF11
+---
 
-This document describes the **Protocol v4** implementation for the webastolora project: a LoRa-based command/response system optimized for minimal airtime and maximum range.
+# LoRa Protocol v4 Implementation
+
+This document describes the optimized Protocol v4 for the webastolora project: a LoRa command/response system achieving 57% airtime reduction through variable-length packets and smart quantization.
 
 ---
 
