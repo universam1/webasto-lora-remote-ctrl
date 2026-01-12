@@ -46,8 +46,7 @@ static String readLineNonBlocking()
 static proto::Packet makeCommandPacket(proto::CommandKind kind, uint8_t minutes, uint16_t seq)
 {
   proto::Packet pkt{};
-  pkt.h.magic = proto::kMagic;
-  pkt.h.version = proto::kVersion;
+  pkt.h.magic_version = proto::kMagicVersion;
   pkt.h.type = proto::MsgType::Command;
   pkt.h.src = LORA_NODE_SENDER;
   pkt.h.dst = LORA_NODE_RECEIVER;

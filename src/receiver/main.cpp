@@ -32,8 +32,7 @@ static bool gTlvSupported = false;
 
 static void sendStatus(int rssiDbm, float snrDb) {
   proto::Packet pkt{};
-  pkt.h.magic = proto::kMagic;
-  pkt.h.version = proto::kVersion;
+  pkt.h.magic_version = proto::kMagicVersion;
   pkt.h.type = proto::MsgType::Status;
   pkt.h.src = LORA_NODE_RECEIVER;
   pkt.h.dst = LORA_NODE_SENDER;
@@ -71,8 +70,8 @@ static bool tryReceiveCommandWindow(uint32_t windowMs, int& lastCmdRssi, float& 
   while (millis() - start < windowMs) {
     if (loraLink.recv(outPkt, lastCmdRssi, lastCmdSnr)) {
       statusLed.toggle();  // Flash LED on RX
-      Serial.printf("[LORA-RX] Got packet: magic=0x%04X ver=%d type=%d src=%d dst=%d seq=%d\n",
-                    outPkt.h.magic, outPkt.h.version, static_cast<int>(outPkt.h.type),
+      Serial.printf("[LORA-RX] Got packet: magic_version=0x%02X type=%d src=%d dst=%d seq=%d\n",
+                    outPkt.h.magic_version, static_cast<int>(outPkt.h.type),
                     outPkt.h.src, outPkt.h.dst, outPkt.h.seq);
       if (outPkt.h.type == proto::MsgType::Command && outPkt.h.dst == LORA_NODE_RECEIVER) {
         return true;

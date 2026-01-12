@@ -5,8 +5,9 @@
 
 namespace proto {
 
-static constexpr uint32_t kMagic = 0x574C5231; // 'WLR1'
-static constexpr uint8_t kVersion = 3;
+// Protocol v4 magic byte (fused magic + version)
+// 0x34 = ASCII '4' = Protocol v4
+static constexpr uint8_t kMagicVersion = 0x34;  // 'WLR4'
 
 // Default pre-shared key for AES-128-CTR encryption
 // CHANGE THIS FOR PRODUCTION: Use a unique key per device pair
@@ -37,12 +38,12 @@ enum class HeaterState : uint8_t {
 
 #pragma pack(push, 1)
 struct PacketHeader {
-  uint32_t magic;
-  uint8_t version;
+  uint8_t magic_version;  // 0x34 for Protocol v4 (fused magic + version)
   MsgType type;
   uint8_t src;
   uint8_t dst;
   uint16_t seq;
+  // Total: 6 bytes (was 10)
 };
 
 struct CommandPayload {
@@ -69,34 +70,60 @@ struct StatusPayload {
   uint16_t power;
 };
 
+// Packet structure with variable-length payload support (Protocol v4)
+// Actual wire format: header (10 bytes) + payload (N bytes) + crc (2 bytes)
+// The union below is used for in-memory representation only.
+// For serialization, use getPayloadSize() and serialize manually.
 struct Packet {
   PacketHeader h;
   union {
     CommandPayload cmd;
     StatusPayload status;
-    uint8_t raw[32];
+    uint8_t raw[32];  // Max payload size
   } p;
   uint16_t crc;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(Packet) <= 64, "Packet too large");
+// Get actual payload size in bytes based on message type
+inline size_t getPayloadSize(const Packet& pkt) {
+  switch (pkt.h.type) {
+    case MsgType::Command:
+      return sizeof(CommandPayload);  // 2 bytes
+    case MsgType::Status:
+      return sizeof(StatusPayload);   // 14 bytes
+    case MsgType::Ack:
+      return 0;  // No payload
+    default:
+      return 0;
+  }
+}
+
+// Get total wire packet size (header + payload + crc)
+inline size_t getWirePacketSize(const Packet& pkt) {
+  return sizeof(PacketHeader) + getPayloadSize(pkt) + sizeof(pkt.crc);
+}
 
 uint16_t crc16_ccitt(const uint8_t* data, size_t len);
 
+// Calculate CRC for variable-length packet
+// Covers header + actual payload (not the entire union)
 inline uint16_t calcCrc(const Packet& pkt) {
-  return crc16_ccitt(reinterpret_cast<const uint8_t*>(&pkt), sizeof(Packet) - sizeof(pkt.crc));
+  size_t payloadSize = getPayloadSize(pkt);
+  size_t totalSize = sizeof(PacketHeader) + payloadSize;
+  return crc16_ccitt(reinterpret_cast<const uint8_t*>(&pkt), totalSize);
 }
 
 inline bool validate(const Packet& pkt) {
-  if (pkt.h.magic != kMagic) return false;
-  if (pkt.h.version != kVersion) return false;
+  if (pkt.h.magic_version != kMagicVersion) return false;
   return pkt.crc == calcCrc(pkt);
 }
 
 // Encrypt payload union in-place using AES-128-CTR with implicit nonce
 // Nonce is derived from packet seq + src + dst
+// Only encrypts the actual payload, not the entire union
 inline void encryptPacket(Packet& pkt) {
+  size_t payloadSize = getPayloadSize(pkt);
   uint8_t plaintext[32];
   uint8_t ciphertext[32];
   memcpy(plaintext, pkt.p.raw, sizeof(plaintext));
@@ -108,6 +135,7 @@ inline void encryptPacket(Packet& pkt) {
 
 // Decrypt payload union in-place using AES-128-CTR with implicit nonce
 inline void decryptPacket(Packet& pkt) {
+  size_t payloadSize = getPayloadSize(pkt);
   uint8_t ciphertext[32];
   uint8_t plaintext[32];
   memcpy(ciphertext, pkt.p.raw, sizeof(ciphertext));
