@@ -57,6 +57,9 @@ class MenuHandler
 
   // Check if menu has timed out (and auto-hide)
   bool isTimedOut() const;
+  
+  // Get long press progress (0.0 to 1.0) for visual feedback
+  float getLongPressProgress() const;
 
  private:
   uint8_t buttonPin = GPIO_NUM_0;
@@ -67,6 +70,7 @@ class MenuHandler
   bool buttonWasPressed = false;
   uint32_t menuShowTimeMs = 0;
   bool itemActivated = false;
+  bool longPressTriggered = false;  // Prevents re-triggering on same press
 
   // Constants for button handling
   static constexpr uint32_t DEBOUNCE_MS = 20;

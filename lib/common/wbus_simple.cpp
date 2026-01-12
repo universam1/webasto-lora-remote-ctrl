@@ -588,3 +588,30 @@ bool WBusSimple::needsRenewal(uint32_t nowMs) const {
   if (nowMs >= activeUntilMs) return true; // Already expired
   return (activeUntilMs - nowMs) < kRenewalThresholdMs;
 }
+
+const char* WBusSimple::opStateToStr(uint8_t opState) {
+  switch (opState) {
+    case 0x00: return "Burn Out";
+    case 0x01: return "Off";
+    case 0x02: return "Prestart";
+    case 0x03: return "Glow Plug";
+    case 0x04: return "Off";
+    case 0x05: return "Igniting";
+    case 0x06: return "Ignite Dly";
+    case 0x07: return "Ramp Up";
+    case 0x08: return "Stabilize";
+    case 0x09: return "Heat Run";
+    case 0x0A: return "Vent Run";
+    case 0x0B: return "Cool Down";
+    case 0x0C: return "Circ Pump";
+    case 0x0D: return "Vent Cool";
+    case 0x0E: return "Boost";
+    case 0x0F: return "Idle";
+    case 0x10: return "Heat Full";
+    case 0x11: return "Heat Part";
+    case 0x12: return "Vent Full";
+    case 0x13: return "Vent Part";
+    default:
+      return "Unknown";
+  }
+}

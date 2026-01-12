@@ -250,18 +250,14 @@ static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
   
-  // Flash display for visual feedback
-  for (int i = 0; i < 3; i++) {
-    ui.setInverted(true);
-    ui.render();
-    delay(100);
-    ui.setInverted(false);
-    ui.render();
-    delay(100);
-  }
+  // Brief inverted flash to confirm activation
+  ui.setInverted(true);
+  ui.render();
+  delay(150);
+  ui.setInverted(false);
   
-  // Hide menu and return to status view
-  menu.hide();
+  // Clear progress bar
+  ui.drawProgressBar(0, 0, 0.0f);
   
   #ifdef ENABLE_MQTT_CONTROL
   gLastCommandSource = "button";  // Phase 6: Track command source
@@ -692,7 +688,9 @@ void loop() {
           gStatus.state = proto::HeaterState::Error;
         }
         
+        #ifdef ENABLE_MQTT_CONTROL
         gLastCommandSource = "lora";  // Phase 6: Track command source
+        #endif
 
         gLastProcessedCmdSeq = pkt.h.seq;
         gStatus.lastCmdSeq = gLastProcessedCmdSeq;
@@ -893,9 +891,10 @@ void loop() {
   }
 #endif
 
-  // OLED refresh
+  // OLED refresh - faster when in menu (for progress bar), slower otherwise
   static uint32_t lastUiMs = 0;
-  if (millis() - lastUiMs > 250) {
+  uint32_t uiInterval = (menu.getState() == MenuState::Visible) ? 50 : 250;
+  if (millis() - lastUiMs > uiInterval) {
     lastUiMs = millis();
 
     // Check if menu is visible
@@ -939,13 +938,22 @@ void loop() {
         }
       }
       
-      // Page indicator on line 5
-      ui.setLine(5, String("Page ") + String(page + 1) + "/" + String(totalPages));
+      // Page indicator on line 5, or progress bar when holding
+      float progress = menu.getLongPressProgress();
+      if (progress > 0.0f) {
+        ui.setLine(5, "Hold...");
+        ui.drawProgressBar(55, 60, progress);  // Progress bar on right side of line 5
+      } else {
+        ui.setLine(5, String("Page ") + String(page + 1) + "/" + String(totalPages));
+        ui.drawProgressBar(0, 0, 0.0f);  // Clear progress bar
+      }
     }
     else
     {
+      // Clear progress bar when not in menu
+      ui.drawProgressBar(0, 0, 0.0f);
       // Render normal status view
-      ui.setLine(0, "Webasto LoRa Receiver");
+      // ui.setLine(0, "Webasto LoRa Receiver"); TODO usefull info
       ui.setLine(1,
                  String("State: ") +
                      (gStatus.state == proto::HeaterState::Running
@@ -954,7 +962,7 @@ void loop() {
                                  ? "OFF"
                                  : (gStatus.state == proto::HeaterState::Error ? "ERR" : "UNK"))));
       ui.setLine(2, String("Last min: ") + String(gLastRunMinutes));
-      ui.setLine(3, String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX));
+      ui.setLine(3, String("State: ") + String(WBusSimple::opStateToStr(gStatus.lastWbusOpState)));
 
       if (gLastCmdMs == 0) {
         ui.setLine(4, "Last cmd: (none)");
@@ -981,13 +989,13 @@ void loop() {
           statusLine = String("Temp: ") + String(gStatus.temperatureC) + "C";
           break;
         case 1:  // Voltage
-          statusLine = String("Volt: ") + String(gStatus.voltage_mV) + "mV";
+          statusLine = String("Volt: ") + String(gStatus.voltage_mV / 1000.0f, 2) + "V";
           break;
         case 2:  // Heater power
-          statusLine = String("Power: ") + String(gStatus.power);
+          statusLine = String("Power: ") + String(gStatus.power) + "W";
           break;
-        case 3:  // Operating state
-          statusLine = String("OpState: 0x") + String(gStatus.lastWbusOpState, HEX);
+        case 3:  // minutes remaining / op state
+          statusLine = String("Remaining: ") + String(gStatus.minutesRemaining) + " min";
           break;
 #ifdef ENABLE_MQTT_CONTROL
         case 4:  // WiFi/MQTT status

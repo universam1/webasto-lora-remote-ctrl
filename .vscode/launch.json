@@ -12,21 +12,21 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/receiver/firmware.elf",
-            "projectEnvName": "receiver",
+            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/sender/firmware.elf",
+            "projectEnvName": "sender",
             "toolchainBinDir": "/home/sam/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
-                "task": "Pre-Debug (receiver)"
+                "task": "Pre-Debug (sender)"
             }
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/receiver/firmware.elf",
-            "projectEnvName": "receiver",
+            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/sender/firmware.elf",
+            "projectEnvName": "sender",
             "toolchainBinDir": "/home/sam/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
@@ -34,8 +34,8 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/receiver/firmware.elf",
-            "projectEnvName": "receiver",
+            "executable": "/home/sam/src/webasto-lora-remote-ctrl/.pio/build/sender/firmware.elf",
+            "projectEnvName": "sender",
             "toolchainBinDir": "/home/sam/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"

@@ -7,6 +7,7 @@
 #include "status_led.h"
 #include "encryption.h"
 #include "menu_handler.h"
+#include "wbus_simple.h"
 
 static OledUi ui;
 static LoRaLink loraLink;
@@ -174,18 +175,14 @@ static void handleMenuSelection(MenuItem item)
 {
   Serial.printf("[MENU] Activated: %s\n", menuItemToStr(item));
 
-  // Flash display for visual feedback
-  for (int i = 0; i < 3; i++) {
-    ui.setInverted(true);
-    ui.render();
-    delay(100);
-    ui.setInverted(false);
-    ui.render();
-    delay(100);
-  }
-
-  // Hide menu and return to status view
-  menu.hide();
+  // Brief inverted flash to confirm activation
+  ui.setInverted(true);
+  ui.render();
+  delay(150);
+  ui.setInverted(false);
+  
+  // Clear progress bar
+  ui.drawProgressBar(0, 0, 0.0f);
 
   switch (item)
   {
@@ -429,9 +426,10 @@ void loop()
     }
   }
 
-  // OLED refresh
+  // OLED refresh - faster when in menu (for progress bar), slower otherwise
   static uint32_t lastUiMs = 0;
-  if (millis() - lastUiMs > 250)
+  uint32_t uiInterval = (menu.getState() == MenuState::Visible) ? 50 : 250;
+  if (millis() - lastUiMs > uiInterval)
   {
     lastUiMs = millis();
 
@@ -477,12 +475,22 @@ void loop()
       }
       
       // Page indicator on line 5
-      ui.setLine(5, String("Page ") + String(page + 1) + "/" + String(totalPages));
+      float progress = menu.getLongPressProgress();
+      if (progress > 0.0f) {
+        ui.setLine(5, "Hold...");
+        ui.drawProgressBar(55, 60, progress);  // Progress bar on right side of line 5
+      } else {
+        ui.setLine(5, String("Page ") + String(page + 1) + "/" + String(totalPages));
+        ui.drawProgressBar(0, 0, 0.0f);  // Clear progress bar
+      }
     }
     else
     {
+      // Clear progress bar when not in menu
+      ui.drawProgressBar(0, 0, 0.0f);
+      
       // Render normal status view
-      ui.setLine(0, "Webasto Sender Bat:" + String(gBattV, 1) + "V");
+      ui.setLine(0, "Sender Bat:" + String(gBattV, 1) + "V");
       ui.setLine(1, String("Preset:") + String(gLastMinutes) + "min -> " + String(gLastStatus.minutesRemaining) + "min");
 
       if (gLastStatusRxMs == 0)
@@ -494,7 +502,7 @@ void loop()
       else
       {
         uint32_t age = (millis() - gLastStatusRxMs) / 1000;
-        ui.setLine(2, String("Heater: ") + heaterStateToStr(gLastStatus.state) + " age:" + String(age) + "s");
+        ui.setLine(2, String("State: ") + WBusSimple::opStateToStr(gLastStatus.lastWbusOpState) + " " + String(age) + "s");
         ui.setLine(3, formatMeasurements(gLastStatus));
         ui.setLine(4,
                    String("RSSI:" + String(gLastStatus.lastRssiDbm) +

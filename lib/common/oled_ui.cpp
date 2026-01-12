@@ -39,10 +39,27 @@ void OledUi::render() {
     u8g2.drawStr(0, i * 11, lines[i].c_str());
   }
   
+  // Draw progress bar if set
+  if (progressBarValue > 0.0f && progressBarWidth > 0) {
+    uint8_t fillWidth = static_cast<uint8_t>(progressBarValue * progressBarWidth);
+    // Draw outline
+    u8g2.drawFrame(128 - progressBarWidth - 2, progressBarY, progressBarWidth + 2, 10);
+    // Draw fill
+    if (fillWidth > 0) {
+      u8g2.drawBox(128 - progressBarWidth - 1, progressBarY + 1, fillWidth, 8);
+    }
+  }
+  
   u8g2.setDrawColor(1);  // Reset to normal
   u8g2.sendBuffer();
 }
 
 void OledUi::setInverted(bool inverted) {
   isInverted = inverted;
+}
+
+void OledUi::drawProgressBar(uint8_t y, uint8_t width, float progress) {
+  progressBarY = y;
+  progressBarWidth = width;
+  progressBarValue = progress;
 }

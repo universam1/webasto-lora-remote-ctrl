@@ -33,6 +33,7 @@ void MenuHandler::update()
       {
         // Button just pressed
         buttonPressStartMs = now;
+        longPressTriggered = false;  // Reset long press flag
 
         // If menu is hidden, show it on button press
         if (currentState == MenuState::Hidden)
@@ -48,13 +49,8 @@ void MenuHandler::update()
         // Only process releases in visible state
         if (currentState == MenuState::Visible)
         {
-          if (pressDuration >= LONG_PRESS_MS)
-          {
-            // Long press: mark selected item as activated
-            itemActivated = true;
-            hide();
-          }
-          else
+          // If long press was already triggered while holding, do nothing on release
+          if (!longPressTriggered && pressDuration < LONG_PRESS_MS)
           {
             // Short press: move to next menu item
             selectedItem = static_cast<MenuItem>(
@@ -64,6 +60,19 @@ void MenuHandler::update()
           }
         }
       }
+    }
+  }
+
+  // Check for long press WHILE button is held (trigger during hold, not on release)
+  if (buttonWasPressed && currentState == MenuState::Visible && !longPressTriggered)
+  {
+    uint32_t pressDuration = now - buttonPressStartMs;
+    if (pressDuration >= LONG_PRESS_MS)
+    {
+      // Long press threshold reached while holding: activate immediately
+      longPressTriggered = true;
+      itemActivated = true;
+      hide();
     }
   }
 
@@ -77,11 +86,24 @@ void MenuHandler::update()
   }
 }
 
+// Returns how far along the long press we are (0.0 to 1.0)
+float MenuHandler::getLongPressProgress() const
+{
+  if (!buttonWasPressed || currentState != MenuState::Visible || longPressTriggered)
+    return 0.0f;
+  
+  uint32_t pressDuration = millis() - buttonPressStartMs;
+  if (pressDuration >= LONG_PRESS_MS)
+    return 1.0f;
+  
+  return static_cast<float>(pressDuration) / static_cast<float>(LONG_PRESS_MS);
+}
+
 void MenuHandler::show()
 {
   currentState = MenuState::Visible;
   menuShowTimeMs = millis();
-  selectedItem = MenuItem::Start;  // Reset to first item
+  selectedItem = static_cast<MenuItem>(0);  // Reset to first item
 }
 
 void MenuHandler::hide()

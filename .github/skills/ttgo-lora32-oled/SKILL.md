@@ -61,9 +61,14 @@ Both sender and receiver now feature an interactive menu controlled via **GPIO0*
 |--------|----------|
 | **Short Press (menu hidden)** | Opens menu |
 | **Short Press (menu visible)** | Moves to next menu item, resets timeout |
-| **Long Press ≥800ms (menu visible)** | Activates selected item, closes menu, sends command |
+| **Long Press ≥800ms (menu visible)** | Activates selected item **while holding** (shows progress bar), closes menu |
 | **Menu Timeout (10s)** | Menu automatically closes if no activity |
 | **Debounce** | 20ms mechanical debounce prevents jitter |
+
+### Visual Feedback
+- **Progress bar**: While holding button, a progress bar fills on line 5 showing how long until activation
+- **Invert flash**: Brief inverted display flash (150ms) confirms item activation
+- **Pagination**: Menu items paginate (4 per page) with page indicator
 
 ### Menu Items
 1. **START** - Starts heating with last-set duration (default 30 min)

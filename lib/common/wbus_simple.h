@@ -140,6 +140,9 @@ class WBusSimple {
 
   // Number of retries for commands (per esphome-webasto pattern)
   static constexpr uint8_t kCommandRetries = 3;
+  
+  // Translate W-BUS operating state code to human-friendly text
+  static const char* opStateToStr(uint8_t opState);
 
  private:
   HardwareSerial& port;
