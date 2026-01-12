@@ -80,25 +80,24 @@ void WiFiManager::startConnection() {
   WiFi.disconnect(true);
   delay(100);  // Brief delay for clean disconnect
 
-  // Configure WPA2 Enterprise
-  if (anonymousId_ && strlen(anonymousId_) > 0) {
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)anonymousId_, strlen(anonymousId_));
-    Serial.printf("[WiFi] Anonymous identity: %s\n", anonymousId_);
-  }
+  // Configure WPA2 Enterprise PEAP + MSCHAPv2
+  // Using WiFi.begin() with WPA2_AUTH_PEAP (recommended method)
+  Serial.printf("[WiFi] Connecting with PEAP + MSCHAPv2\n");
+  Serial.printf("[WiFi] Identity: %s, Username: %s\n", username_, username_);
   
-  esp_wifi_sta_wpa2_ent_set_username((uint8_t*)username_, strlen(username_));
-  esp_wifi_sta_wpa2_ent_set_password((uint8_t*)password_, strlen(password_));
-  esp_wifi_sta_wpa2_ent_enable();
-
-  // Start connection
+  // For PEAP + MSCHAPv2 without certificate:
+  // WiFi.begin(ssid, WPA2_AUTH_PEAP, EAP_IDENTITY, EAP_USERNAME, EAP_PASSWORD)
+  // Note: For PEAP, identity and username are typically the same
+  
   if (bssidCached_) {
     // Fast reconnect with cached BSSID and channel
     Serial.printf("[WiFi] Fast reconnect (channel %d)\n", cachedChannel_);
-    WiFi.begin(ssid_, nullptr, cachedChannel_, cachedBssid_);
+    WiFi.begin(ssid_, WPA2_AUTH_PEAP, username_, username_, password_, 
+               nullptr, nullptr, nullptr, cachedChannel_, cachedBssid_);
   } else {
-    // Full scan
+    // Full scan - PEAP with identity, username, and password
     Serial.println("[WiFi] Full network scan");
-    WiFi.begin(ssid_);
+    WiFi.begin(ssid_, WPA2_AUTH_PEAP, username_, username_, password_);
   }
 }
 
