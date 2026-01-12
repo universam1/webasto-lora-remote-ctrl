@@ -3,6 +3,8 @@
 #include "project_config.h"
 #include <time.h>
 
+#ifdef ENABLE_MQTT_CONTROL
+
 #ifdef MQTT_ENABLE_OTA
 #include "ota_updater.h"
 #endif
@@ -21,9 +23,9 @@ MQTTClient::MQTTClient(WiFiManager& wifiMgr)
     reconnectIntervalMs_(5000),
     discoveryPublished_(false),
     cmdCallback_(nullptr)
-    #ifdef MQTT_ENABLE_OTA
+#ifdef MQTT_ENABLE_OTA
     , otaUpdater_(nullptr)
-    #endif
+#endif
 {
   instance_ = this;
   mqtt_.setCallback(messageCallback);
@@ -136,7 +138,7 @@ void MQTTClient::subscribe() {
 }
 
 bool MQTTClient::isConnected() const {
-  return mqtt_.connected();
+  return const_cast<PubSubClient&>(mqtt_).connected();
 }
 
 bool MQTTClient::publishState(const char* mode) {
@@ -225,10 +227,10 @@ bool MQTTClient::publishDiscovery() {
 
   Serial.println("[MQTT] Publishing HomeAssistant discovery...");
 
-  StaticJsonDocument<1024> doc;
+  JsonDocument doc;
   
   // Device info
-  JsonObject device = doc.createNestedObject("device");
+  JsonObject device = doc["device"].to<JsonObject>();
   device["identifiers"].add("webasto_receiver_001");
   device["name"] = "Webasto ThermoTop C";
   device["manufacturer"] = "Custom";
@@ -236,7 +238,7 @@ bool MQTTClient::publishDiscovery() {
   device["sw_version"] = "1.0.0";
 
   // Origin info
-  JsonObject origin = doc.createNestedObject("origin");
+  JsonObject origin = doc["origin"].to<JsonObject>();
   origin["name"] = "Webasto LoRa Controller";
   origin["sw"] = "1.0.0";
   origin["url"] = "https://github.com/yourusername/webastolora";
@@ -377,7 +379,7 @@ void MQTTClient::handleMessage(const char* topic, const byte* payload,
 
 bool MQTTClient::parseCommand(const char* payload, unsigned int length, 
                                MQTTCommand& cmd) {
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, payload, length);
 
   if (error) {
@@ -662,5 +664,7 @@ bool MQTTClient::publishOTAStatus(const char* status, const char* message) {
   return mqtt_.publish(OTA_STATUS_TOPIC, payload.c_str(), true);
 }
 #endif
+
+#endif // ENABLE_MQTT_CONTROL
 
 

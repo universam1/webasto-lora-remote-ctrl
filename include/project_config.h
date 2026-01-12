@@ -205,9 +205,9 @@
 // MQTT/HomeAssistant Configuration
 // ============================================================================
 
-// Feature flag - disable MQTT completely if not needed
-// Comment out to disable MQTT support
-#define ENABLE_MQTT_CONTROL
+// Feature flag - enable MQTT support
+// This can be defined via build flags in platformio.ini, or uncomment here
+// #define ENABLE_MQTT_CONTROL
 
 #ifdef ENABLE_MQTT_CONTROL
 
@@ -247,20 +247,22 @@
 // Phase 6: Additional Diagnostic Sensors
 // ============================================================================
 
-// Enable/disable diagnostic sensors (comment out to disable)
-#define MQTT_ENABLE_DIAGNOSTIC_SENSORS
+// Enable/disable diagnostic sensors (can be defined via build flags)
+// #define MQTT_ENABLE_DIAGNOSTIC_SENSORS
 
+#ifdef MQTT_ENABLE_DIAGNOSTIC_SENSORS
 // Diagnostic sensor publishing interval (less frequent than status)
 #ifndef MQTT_DIAGNOSTIC_INTERVAL_MS
 #define MQTT_DIAGNOSTIC_INTERVAL_MS 60000  // Publish diagnostics every 60s
+#endif
 #endif
 
 // ============================================================================
 // Phase 7: OTA Updates
 // ============================================================================
 
-// Enable/disable OTA updates (comment out to disable)
-#define MQTT_ENABLE_OTA
+// Enable/disable OTA updates (can be defined via build flags)
+// #define MQTT_ENABLE_OTA
 
 #ifdef MQTT_ENABLE_OTA
 // OTA check interval (check for updates every 6 hours)

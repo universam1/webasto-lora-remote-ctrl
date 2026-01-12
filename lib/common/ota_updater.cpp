@@ -2,6 +2,8 @@
 #include "project_config.h"
 #include <WiFi.h>
 
+#ifdef MQTT_ENABLE_OTA
+
 OTAUpdater* OTAUpdater::instance_ = nullptr;
 
 OTAUpdater::OTAUpdater()
@@ -165,3 +167,5 @@ OTAResult OTAUpdater::performUpdate(const char* url, const char* username, const
   
   return OTAResult::SUCCESS;
 }
+
+#endif // MQTT_ENABLE_OTA

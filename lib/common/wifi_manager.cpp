@@ -1,6 +1,8 @@
 #include "wifi_manager.h"
 #include "project_config.h"
 
+#ifdef ENABLE_MQTT_CONTROL
+
 WiFiManager* WiFiManager::instance_ = nullptr;
 
 WiFiManager::WiFiManager()
@@ -205,3 +207,5 @@ void WiFiManager::onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       break;
   }
 }
+
+#endif // ENABLE_MQTT_CONTROL
