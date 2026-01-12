@@ -41,7 +41,76 @@ In this repo these correspond to:
 - `OLED_SCL=15`
 - `OLED_RST=16`
 
-## Concept update (battery-power, 10s acceptable command latency)
+## Interactive OLED Menu System
+
+Both sender and receiver now feature an interactive menu controlled via **GPIO0** (the boot button on TTGO LoRa32).
+
+### Button Behavior
+| Action | Behavior |
+|--------|----------|
+| **Short Press (menu hidden)** | Opens menu |
+| **Short Press (menu visible)** | Moves to next menu item, resets timeout |
+| **Long Press ≥800ms (menu visible)** | Activates selected item, closes menu, sends command |
+| **Menu Timeout (10s)** | Menu automatically closes if no activity |
+| **Debounce** | 20ms mechanical debounce prevents jitter |
+
+### Menu Items
+1. **START** - Starts heating with last-set duration (default 30 min)
+2. **STOP** - Stops heating
+3. **RUN 10min** - Starts heating for 10 minutes
+4. **RUN 20min** - Starts heating for 20 minutes
+5. **RUN 30min** - Starts heating for 30 minutes
+6. **RUN 90min** - Starts heating for 90 minutes
+
+### Sender Menu Behavior
+- Sends LoRa command to receiver
+- Waits for acknowledgment (shows "Waiting ACK" on OLED)
+- Preset duration is remembered and used by START command
+- OLED shows status view normally, menu replaces status when opened
+
+### Receiver Menu Behavior
+- Sends W-BUS command directly to heater
+- Immediate W-BUS response updates heater state
+- Preset duration is remembered for next menu activation
+- OLED shows status view normally, menu replaces status when opened
+
+### OLED Display Modes
+
+**Status View (normal, menu hidden)**
+```
+Webasto LoRa Sender        | Receiver heating status
+Preset: 30min | 12.5V      | showing W-BUS state
+OFF          5s ago        | Last command: 120s ago
+50°C  13.2V  2200W         | Operating state: 0x05
+RSSI: -95dBm SNR: 8dB      | Power: 2200W
+Waiting for status...      | Temperature: 65°C
+```
+
+**Menu View (menu visible)**
+```
+=== MENU ===
+
+> START
+STOP
+RUN 10min
+RUN 20min
+
+Long press to activate
+```
+
+### Implementation Files
+- **New files**: `lib/common/menu_handler.h`, `lib/common/menu_handler.cpp`
+- **Modified**: `src/sender/main.cpp`, `src/receiver/main.cpp`, `include/project_config.h`
+- **Config**: `MENU_BUTTON_PIN` defined as GPIO_NUM_0 in `project_config.h`
+
+### Button-Free Alternative
+If you don't want interactive menus, the devices still work with serial commands:
+- **Sender**: Serial input parses commands (start, stop, run N)
+- **Receiver**: Responds to LoRa commands without requiring button interaction
+
+---
+
+## Concept: Battery Power & 10-Second Command Latency
 
 Given that up to ~10 seconds of command latency is acceptable, the most battery-efficient approach is:
 

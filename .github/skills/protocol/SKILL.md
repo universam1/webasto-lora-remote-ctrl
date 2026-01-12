@@ -153,7 +153,7 @@ int16_t unpackTemp(uint8_t packed) {
 ### Voltage Quantization (near-lossless)
 **Encoding**: `packed = (voltage_mV - 8000) / 32`
 - Range: 8.0V to 16.16V (covers 12V battery system ±4.16V)
-- Error: ±16mV typical (0.13% at 12V, < sensor noise ~50mV)
+- Error: ±16mV typical (0.13% at 12V, estimated < sensor noise ~50mV)
 - Step size: 32mV (roughly), covers voltage resolution needs
 
 ```c
@@ -171,9 +171,9 @@ uint16_t unpackVoltage(uint8_t packed) {
 
 **Test vectors**:
 - 12.00V (12000 mV) → 125 → 12.0V ✓ (exact)
-- 10.00V (10000 mV) → 62 → 9.984V ✓ (±16mV, 0.16%)
+- 10.00V (10000 mV) → 62 → 9.984V ✓ (±16mV, 0.16%, estimated < sensor noise)
 - 14.40V (14400 mV) → 200 → 14.4V ✓ (exact)
-- 13.50V (13500 mV) → 171 → 13.472V ✓ (±28mV, 0.21%)
+- 13.50V (13500 mV) → 171 → 13.472V ✓ (±28mV, 0.21%, estimated < sensor noise)
 
 ### Power Quantization (matches W-BUS resolution)
 **Encoding**: `packed = power_W / 16`
@@ -201,10 +201,11 @@ uint16_t unpackPower(uint8_t packed) {
 - 2200W → 137 → 2192W ✓ (±8W, 0.4%)
 
 ### Phase 2 Results
-| Packet Type | Before Phase 1 | After Phase 2 | Saved |
+| Packet Type | Payload Before Phase 1 | Payload After Phase 2 | Wire Size Reduction |
 |-------------|--------|-------|-------|
-| Status      | 26B    | 17B   | 9B (35%) |
-| **Combined (v3→Phase1+2)** | **44B** | **17B** | **27B (61%)** |
+| Status payload only | 14 bytes | 9 bytes | 5 bytes saved |
+| Status wire packet | 26 bytes (header+payload+CRC) | 17 bytes (header+payload+CRC) | 9 bytes saved (35%) |
+| **Combined (v3→Phase1+2)** | **44 bytes (fixed)** | **17 bytes (variable)** | **27 bytes saved (61%)** |
 
 **Sensor fields only**: 6 bytes → 3 bytes (50% reduction)
 **Removed**: workingHours field (2 bytes) - not useful for sender
@@ -215,6 +216,26 @@ uint16_t unpackPower(uint8_t packed) {
 ---
 
 ## Implementation Details
+
+### Security & Encryption
+
+**AES-128-CTR Encryption** is implemented for all LoRa packets:
+- **Algorithm**: AES (Advanced Encryption Standard) in CTR (Counter) mode
+- **Key size**: 128 bits (16 bytes)
+- **Implementation**: `lib/common/encryption.h/cpp`
+- **Scope**: All packet data (header + payload) is encrypted before transmission
+- **Decryption on receive**: Packets are decrypted upon reception and validated before processing
+- **Note**: Encryption is applied transparently within the existing packet structure and does not affect packet size or CRC calculation
+
+**Key Management**:
+- Encryption key is configured in `include/project_config.h` or via build flag
+- Both sender and receiver must use the same key
+- Key length is enforced to be exactly 16 bytes
+
+**Security Benefits**:
+- Prevents eavesdropping on command and status messages
+- Ensures only authenticated sender/receiver pairs can communicate
+- Protects against replay attacks through sequence number validation
 
 ### File Locations
 
@@ -379,10 +400,10 @@ bool LoraLink::recv(Packet& pkt, uint32_t timeoutMs) {
 - Version byte (0x34) enables future detection of old packets
 
 ### Sender-Receiver Synchronization
-1. **Sender encodes quantized fields**: Use `packTemp()`, `packVoltage()`, `packPower()`
-2. **Receiver decodes quantized fields**: Use `unpackTemp()`, `unpackVoltage()`, `unpackPower()`
-3. **Sender displays unpacked values**: Show actual °C, mV, W to user (no visible degradation)
-4. **Receiver W-BUS integration**: Pack W-BUS sensor values before storing in status struct
+1. **Receiver packs quantized fields**: When reading W-BUS sensor values, apply `packTemp()`, `packVoltage()`, `packPower()` before storing in status struct
+2. **Sender unpacks quantized fields**: When displaying received status, apply `unpackTemp()`, `unpackVoltage()`, `unpackPower()` for UI display
+3. **Sender sends commands (unquantized)**: Command payloads are simple (2 bytes, unquantized)
+4. **Receiver packs for transmission**: W-BUS sensor values are quantized before LoRa transmission in status packets
 
 ### Migration Path
 **Option A (Recommended)**: Deploy Phase 1 + Phase 2 together

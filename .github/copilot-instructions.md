@@ -1,5 +1,7 @@
 # Copilot instructions for this repo (webastolora)
 
+IMPORTANT: When asked to create new documentation, update the existing agents.md or skill.md files instead of creating a new file, unless a new file is explicitly requested and specified.
+
 This repository contains a PlatformIO project for **two TTGO LoRa32-OLED V1.0** ESP32 boards:
 
 - **sender**: sends commands over LoRa (start / stop / run N minutes) and shows status on OLED.
@@ -138,14 +140,16 @@ Tuning macros (defaults in `include/project_config.h`):
 ## LoRa protocol versioning (important)
 
 - Packet structs are in `lib/common/protocol.h`.
-- Protocol version is currently `kVersion = 3`.
+- **Protocol version is currently `kVersion = 4`** (v4 Phase 1+2 optimizations deployed).
+- Variable-length packets: 8-17 bytes typical wire size (vs 44 bytes fixed in v3).
 - `StatusPayload` includes `lastCmdSeq` which acts as an ACK correlation field.
 - Sender retries commands until it receives a `Status` message with `lastCmdSeq == command.seq`.
 
 If you change packet layout:
 - Bump `kVersion`.
-- Keep packet size <= 64 bytes (see static_assert).
-- Ensure both sender and receiver are updated together.
+- Ensure both sender and receiver are updated together (no backward compatibility with v3).
+- Verify CRC calculation for variable-length payloads.
+- See `.github/skills/protocol/SKILL.md` for complete v4 implementation details.
 
 ---
 
@@ -168,3 +172,76 @@ If you change packet layout:
 - W‑BUS simulator firmware: `src/simulator/main.cpp`
 - TTGO pin mapping skill note: `.github/skills/ttgo-lora32-oled/SKILL.md`
 - W‑BUS skill note: `.github/skills/wbus/SKILL.md`
+
+---
+
+## Learnings & discoveries
+
+This section documents findings, patterns, and lessons learned during development that don't fit into the structured sections above. Update this when you discover:
+- Edge cases in W‑BUS protocol handling
+- Power consumption optimizations
+- LoRa tuning results or environmental factors
+- Hardware quirks or workarounds
+- Performance bottlenecks and their solutions
+- Testing outcomes and recommended configurations
+- Integration insights between sender/receiver/simulator
+
+### Resolved learnings (completed and integrated)
+
+#### Protocol v4 Phase 1: Variable-Length Payload + Fused Magic/Version
+- **Discovery**: 4-byte magic constant was redundant with version field for validation. Packet payloads varied but were padded to 32 bytes, wasting space.
+- **Solution**: Fused magic and version into single byte 0x34 (ASCII '4' for v4). Implemented variable-length packet serialization on wire (only send actual payload + CRC, not full 32-byte union).
+- **Impact**: 44 bytes → 21 bytes average (52% reduction). Status packets: 44 → 26 bytes. ACK packets: 44 → 8 bytes. Airtime reduced 12.5 ms → 7.9 ms (-37%). Range gain: +1.5 dB (~25m).
+- **Files**: `lib/common/protocol.h`, `lib/common/lora_link.cpp`, both main.cpp files
+- **Status**: ✅ Complete and deployed
+
+#### Protocol v4 Phase 2: Smart 1-Byte Sensor Quantization
+- **Discovery**: Three 2-byte sensor fields (temperature, voltage, power) could be efficiently reduced to 1-byte each with zero practical data loss.
+- **Quantization strategy**:
+  - **Temperature**: Offset encoding (temp_C + 50) covers -50°C to +205°C, lossless
+  - **Voltage**: (voltage_mV - 8000) / 32 covers 8.0-16.16V, ±16mV typical error (estimated < sensor noise ~50mV)
+  - **Power**: power_W / 16 covers 0-4080W, ±8W typical error (matches W-BUS native 16W granularity)
+- **Impact**: Status payload 14 bytes → 9 bytes (36% reduction). Combined with Phase 1: 44 → 17 bytes (61% total). Airtime: 5.4 ms (-62% vs v3). Range gain: +2.0 dB total (~40m).
+- **Files**: `lib/common/protocol.h` (pack/unpack helpers), `src/receiver/main.cpp` (apply pack to W-BUS values)
+- **Status**: ✅ Complete and tested
+
+#### Interactive GPIO0 Menu System
+- **Discovery**: Users wanted UI control without serial commands. TTGO LoRa32 has built-in boot button (GPIO0) available for menu control.
+- **Implementation**:
+  - Short press: opens menu / navigates items (resets 10s timeout)
+  - Long press ≥800ms: activates selected menu item
+  - Menu items: START, STOP, RUN 10/20/30/90min
+  - Sender sends LoRa command; receiver sends W-BUS command
+  - 20ms debounce prevents mechanical jitter
+- **Impact**: Zero hardware changes required, uses existing GPIO0 button. Both sender and receiver now have identical menu UI.
+- **Files**: `lib/common/menu_handler.h`, `lib/common/menu_handler.cpp`, both main.cpp files, `project_config.h`
+- **Status**: ✅ Complete and deployed
+
+#### W-BUS Field Consolidation
+- **Discovery**: Status payload had unused fields (workingHours, etc.) that weren't useful for sender display.
+- **Optimization**: Removed workingHours field from StatusPayload, saved 2 additional bytes.
+- **Impact**: Combined with Phase 2, status payload reduced from 14 to 9 bytes.
+- **Files**: `lib/common/protocol.h`
+- **Status**: ✅ Integrated into Phase 2
+
+#### Low-Power Architecture (10-Second Latency Budget)
+- **Design principle**: Up to 10 seconds of command latency acceptable for battery-powered devices.
+- **Sender approach**: Fire-and-forget repeated commands over 10s window; use `seq` field for deduplication.
+- **Receiver approach**: 
+  - Idle (heater OFF): Duty-cycled RX windows every 5-10s, sleep rest of time
+  - Running (heater ON): Stay mostly awake; keep OLED on per requirement
+- **Impact**: Enabled battery-powered sender to achieve very low average current by sleeping 99%+ of time.
+- **Files**: Power management in both main.cpp files, see `RX_IDLE_LISTEN_WINDOW_MS`, `RX_IDLE_SLEEP_MS` in `project_config.h`
+- **Status**: ✅ Integrated into core architecture
+
+#### 433 MHz Antenna Limitation (Critical Hardware Constraint)
+- **Discovery**: TTGO LoRa32 board antenna is tuned for 433 MHz only. Using 868 MHz or 915 MHz frequencies results in RSSI -157 dBm (no signal received).
+- **Root cause**: Hardware antenna design, not software configuration. SX1276 chip is frequency-agile but antenna is passive tuned component.
+- **Solution**: Always use 433E6 Hz frequency (or EU433 ISM band variants). Frequency is configured via `LORA_FREQUENCY_HZ` build flag in `platformio.ini`.
+- **Files**: `platformio.ini`, `include/project_config.h`
+- **Status**: ✅ Documented as critical hardware constraint
+
+---
+
+### Active learnings (current session)
+*None yet—new discoveries will be logged here as they're validated.*
