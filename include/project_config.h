@@ -58,6 +58,30 @@
 #define LORA_SYNC_WORD 0x12
 #endif
 
+// LORA sets of bandwidth, spreading factor, and coding rate affect range and speed.
+// Adjust these settings based on your environment and requirements.
+//   ; LoRa params optimized for range:
+//   ; SF11 = ~5-10 km range, ~1-2 kbps speed (recommended tradeoff)
+//   ; BW125E3 = 125 kHz (standard, good sensitivity)
+//   ; CR=7 = 4/7 coding rate (improved error correction for range)
+//   ; For short-range high-speed: use SF7, CR5
+//   ; For maximum range (extreme): use SF12, CR8
+#ifdef LORA_RANGE_SHORT
+#define LORA_BW 125E3
+#define LORA_SF 7
+#define LORA_CR 5
+#endif
+#ifdef LORA_RANGE_LONG
+#define LORA_BW 125E3
+#define LORA_SF 11
+#define LORA_CR 7
+#endif
+#ifdef LORA_RANGE_EXTREME
+#define LORA_BW 125E3
+#define LORA_SF 12
+#define LORA_CR 8
+#endif
+
 #ifndef LORA_BW
 #define LORA_BW 125E3
 #endif
