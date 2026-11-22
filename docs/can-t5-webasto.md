@@ -1,7 +1,7 @@
 # VW T5.2 Webasto WWZH on CAN: research and findings
 
-Status: research only, **nothing verified on our vehicle yet** (T5.2, built 2013,
-factory WWZH, roof control unit 7E7906453C). Update this file after each capture session.
+Status: first capture session done 2026-11-22 (T5.2, built 2013, factory WWZH,
+roof control unit 7E7906453C). Command candidate 0x5D3 found, not yet tested by sending.
 
 ## Bus
 - Heater on **Komfort-CAN** (wire colour orange/green = CAN-H, orange/brown = CAN-L).
@@ -51,4 +51,30 @@ About five frames `80 FE xx` around on/off (xx e.g. 00, 0E, 07, 14, 16). Possibl
 - Never add a terminator; sniff listen-only.
 
 ## Capture log
-(fill in: date, tap point, bitrate, scan result, actions, findings)
+
+### 2026-11-22, radio Quadlock A9/A10, 100 kbit/s
+Hardware: LOLIN ESP32-S2 mini + SN65HVD230 (no Rs), listen-only.
+- Bus: about 330 frames/s, 56 IDs, 0 missed, 1 bus error in total. SN65HVD230 reads it fine.
+- Captures (local, gitignored): `mcp-can-capture/captures/baseline_radio_awake.*`,
+  `roof_panel_actions.*` (504 s, markers heat_on, heat_off, heat_on_2, heat_off_2, vent_on, vent_off).
+
+**0x3E5 layout confirmed** for the T5.2 (byte 1 = control LED/combustion/water pump,
+byte 4 = power, byte 5 = coolant −48 + 0.75·x °C, byte 6 b0 fuel pump, byte 7 b0 ventilation).
+Idle example `00 00 00 40 00 4C 00 00` (9 °C).
+
+**0x5D3, command candidate** (DLC 2, cyclic 500 ms, sender unknown):
+
+| Event (roof panel) | 0x5D3 | 0x3E5 reaction | 0x3E3 byte 4 |
+|---|---|---|---|
+| heat off (104.3 s, 411.6 s) | `02 00` → `00 00` | +87 / +180 ms: LED off, power 0 | → `00` |
+| heat on (294.7 s) | `00 00` → `02 00` | +178 ms: LED on, fuel pump on | → `01` |
+| vent on (450.3 s) | `00 00` → `04 00` | +13 ms: byte 1 `09`, byte 7 `01` (ventilation) | → `01` |
+| vent off (484.1 s) | `04 00` → `00 00` | +82 ms: ventilation off | → `00` |
+
+Hypothesis: 0x5D3 byte 0 = requested mode (0x00 off, 0x02 heat, 0x04 vent), sent by the
+roof control unit (or forwarded by J533). 0x3E3 byte 4 looks like a "heater active" echo.
+Open: who sends 0x5D3, run time/timer encoding, whether a foreign sender is accepted while
+the original keeps sending `00 00`.
+
+Other IDs seen: 0x3E1 (`20 00 10 00 xx …`) changes when the vehicle blower is operated,
+not heater related. 0x5E1 byte 0 bit 7 changes together with 0x3E1.

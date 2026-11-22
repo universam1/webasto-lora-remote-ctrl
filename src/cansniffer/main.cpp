@@ -338,6 +338,7 @@ static void printStats() {
 static void scanBitrates() {
   static const uint32_t rates[] = {100000, 125000, 83333, 50000, 500000, 33333, 250000};
   const bool hadTx = gTxEnabled;
+  const uint32_t prevRate = gBitrate;  // canStart() overwrites gBitrate
   gTxEnabled = false;  // scan always listen-only
   Serial.println("scan: listen-only, 1.5 s per bitrate");
   for (uint32_t r : rates) {
@@ -356,7 +357,7 @@ static void scanBitrates() {
                   (unsigned long)frames, (unsigned long)s.bus_error_count, (unsigned long)errs);
   }
   gTxEnabled = hadTx;
-  canStart(gBitrate);
+  canStart(prevRate);
   Serial.printf("scan done, back on %lu\n", (unsigned long)gBitrate);
 }
 
