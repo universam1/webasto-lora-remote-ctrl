@@ -1,7 +1,7 @@
 # VW T5.2 Webasto WWZH on CAN: research and findings
 
-Status: first capture session done 2026-11-22 (T5.2, built 2013, factory WWZH,
-roof control unit 7E7906453C). Command candidate 0x5D3 found, not yet tested by sending.
+Status 2026-11-22 (T5.2, built 2013, factory WWZH, roof control unit 7E7906453C):
+**heater on/off via CAN works** by sending 0x5D3 at the radio connector (ignition on).
 
 ## Bus
 - Heater on **Komfort-CAN** (wire colour orange/green = CAN-H, orange/brown = CAN-L).
@@ -89,3 +89,23 @@ the original keeps sending `00 00`.
 
 Other IDs seen: 0x3E1 (`20 00 10 00 xx …`) changes when the vehicle blower is operated,
 not heater related. 0x5E1 byte 0 bit 7 changes together with 0x3E1.
+
+### 2026-11-22, TX test at radio Quadlock (ignition on)
+Firmware `cansniffer_tx`, device switched to normal mode only for the burst.
+
+**Heat on:** 3× `5D3 02 00`, 500 ms apart.
+- After TX 1: 0x3E5 byte 6 fuel pump on.
+- TX 2: control LED flickers on/off (the original sender still sent `00 00` in between).
+- From TX 3 on (5.2 s), `5D3 02 00` stays on the bus by itself: the original sender
+  (presumably the roof unit) adopts the state. Heater ran normally (power 0x44, coolant rising).
+
+**Heat off:** 3× `5D3 00 00`, same timing. LED off and power 0 after the first frame;
+from 4.9 s `5D3 00 00` stays on the bus. Normal water pump run-on afterwards.
+
+Results:
+- A short burst is enough; no need to keep sending.
+- J533 forwards our 0x5D3 from the radio bus to the heater.
+- 0 bus errors, 0 missed frames during both tests.
+- Captures: `mcp-can-capture/captures/tx_test_heat_direct.csv`, `tx_test_heat_off_direct.csv` (local).
+
+Open: behaviour with ignition off / sleeping bus, fault memory address 18, run time / timer.

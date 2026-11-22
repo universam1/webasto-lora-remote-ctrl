@@ -442,17 +442,28 @@ class CanSniffer:
             st = self._request(gvret.encode_set_tx(False), gvret.DeviceStatus)
             self.tx_session_enabled = False
             return "TX disabled for this session. " + (_fmt_status(st) if st else "(no status reply)")
-        st = self._request(gvret.encode_set_tx(True), gvret.DeviceStatus)
+        # Only probe the firmware here; the device stays listen-only. send_frame()
+        # switches it to normal mode for the duration of each burst.
+        st = self._request(gvret.cmd(gvret.CMD_STATUS), gvret.DeviceStatus)
         if st is None:
-            return "sent F1 41 01 but got no status reply; TX stays disabled"
+            return "no status reply from device; TX stays disabled"
         if not st.tx_allowed_by_firmware:
-            return "firmware does not allow TX (tx_allowed_by_firmware=0); TX stays disabled. " + _fmt_status(st)
+            return "firmware does not allow TX (tx_allowed_by_firmware=0, flash env cansniffer_tx); TX stays disabled. " + _fmt_status(st)
         self.tx_session_enabled = True
-        warn = ""
-        bp = self.state.bus_params
-        if bp and bp.can0_listen_only:
-            warn = "\nwarning: can0 is in listen-only mode; frames may not be transmitted/acked. Use set_bitrate(listen_only=false)."
-        return "TX enabled for this session. " + _fmt_status(st) + warn
+        bp = self._request(gvret.cmd(gvret.CMD_GET_BUS_PARAMS), gvret.BusParams)
+        return (
+            "TX armed for this session. The device stays listen-only; each send_frame call switches "
+            "it to normal mode, sends, and returns it to listen-only.\n"
+            + _fmt_status(st)
+            + ("\n" + _fmt_bus(bp) if bp else "")
+        )
+
+    def _set_device_tx(self, on: bool) -> gvret.BusParams | None:
+        """Switch the firmware between normal (TX) and listen-only mode and return fresh bus params."""
+        st = self._request(gvret.encode_set_tx(on), gvret.DeviceStatus)
+        if st is None or st.tx_enabled_now != on:
+            raise RuntimeError(f"device did not confirm tx_enabled_now={int(on)}")
+        return self._request(gvret.cmd(gvret.CMD_GET_BUS_PARAMS), gvret.BusParams)
 
     def send_frame(self, can_id: int, data: bytes, extended: bool, count: int, interval_ms: int) -> str:
         self._require()
@@ -464,22 +475,35 @@ class CanSniffer:
         if not 1 <= count <= 1000:
             raise ValueError("count must be 1..1000")
         pkt = gvret.encode_tx_frame(can_id, data, extended)
-        for i in range(count):
-            st = self.state.status
-            if not st or not st.tx_allowed_by_firmware:
-                raise PermissionError(f"tx_allowed_by_firmware dropped after {i} frames; stopped")
-            self._write(pkt)
-            self.tx_sent += 1
-            if self.capture:
-                ts, _ = self.device_now_us()
-            with self._lock:
+        bp = self._set_device_tx(True)
+        if bp is None or bp.can0_listen_only:
+            self._set_device_tx(False)
+            raise RuntimeError("device did not leave listen-only mode; nothing sent")
+        sent = 0
+        try:
+            for i in range(count):
+                self._write(pkt)
+                sent += 1
+                self.tx_sent += 1
                 if self.capture:
-                    self._write_capture_frame(Frame(ts, can_id, extended, "Tx", 0, bytes(data)))
-                    self.capture.tx += 1
-            if i + 1 < count:
-                time.sleep(interval_ms / 1000.0)
+                    ts, _ = self.device_now_us()
+                with self._lock:
+                    if self.capture:
+                        self._write_capture_frame(Frame(ts, can_id, extended, "Tx", 0, bytes(data)))
+                        self.capture.tx += 1
+                if i + 1 < count:
+                    time.sleep(interval_ms / 1000.0)
+            time.sleep(0.05)  # let the last frame leave the TX queue
+        finally:
+            bp_after = self._set_device_tx(False)
+        st_after = self._request(gvret.cmd(gvret.CMD_STATUS), gvret.DeviceStatus)
         cid = f"{can_id:08X}" if extended else f"{can_id:03X}"
-        return f"sent {count}x {cid}#{bytes(data).hex().upper()}" + (" (logged to capture)" if self.capture else "")
+        lines = [f"sent {sent}x {cid}#{bytes(data).hex().upper()}" + (" (logged to capture)" if self.capture else "")]
+        if bp_after:
+            lines.append("after burst: " + _fmt_bus(bp_after))
+        if st_after:
+            lines.append(_fmt_status(st_after))
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------- formatting helpers
@@ -649,8 +673,9 @@ async def decode_3e5(capture: str, max_rows: int = 50) -> str:
 
 @mcp.tool()
 async def enable_tx(confirm: bool) -> str:
-    """Arm CAN transmit for this session (sends F1 41 01). Only call with confirm=true after the
-    user explicitly agreed to inject frames into the car's bus. confirm=false disables TX."""
+    """Arm CAN transmit for this session. Only call with confirm=true after the user explicitly
+    agreed to inject frames into the car's bus; confirm=false disarms. Arming checks that the
+    firmware allows TX (env cansniffer_tx) but keeps the device listen-only."""
     return await _run(sniffer.enable_tx, confirm)
 
 
@@ -658,7 +683,10 @@ async def enable_tx(confirm: bool) -> str:
 async def send_frame(id: str, data_hex: str, extended: bool = False, count: int = 1, interval_ms: int = 100) -> str:
     """Transmit a CAN frame on can0 (id in hex, e.g. "3E5"; data_hex e.g. "60 80 EE 86").
     Refused unless the firmware allows TX and enable_tx(confirm=true) was called this session.
-    Sent frames are logged into the active capture with Dir=Tx."""
+    Switches the device to normal mode for the burst only and back to listen-only afterwards
+    (also on error). Sent frames are logged into the active capture with Dir=Tx.
+    Known commands (T5.2 WWZH): 5D3 "02 00" heat, "04 00" ventilate, "00 00" off; count=3,
+    interval_ms=500."""
 
     def work() -> str:
         return sniffer.send_frame(_parse_int(id), _parse_hex_data(data_hex), extended, count, max(0, interval_ms))

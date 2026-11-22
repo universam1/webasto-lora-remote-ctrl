@@ -24,6 +24,7 @@ class FakeDevice(threading.Thread):
         self.tx_allowed = tx_allowed
         self.tx_on = False
         self.received_tx = []
+        self.tx_mode_at_send = []
         self.bus_cfg = None
         self.ts = 1000
         self.lock = threading.Lock()
@@ -73,6 +74,7 @@ class FakeDevice(threading.Thread):
                         break
                     n = 8 + buf[7]
                     self.received_tx.append(bytes(buf[:n]))
+                    self.tx_mode_at_send.append(self.tx_on)
                     del buf[:n]
                 else:
                     del buf[:2]
@@ -80,7 +82,8 @@ class FakeDevice(threading.Thread):
                         self.send(b"\xF1\x01" + struct.pack("<I", self.ts))
                     elif c == 0x06:
                         v0 = self.bus_cfg[0] if self.bus_cfg else 0
-                        flags = (1 if v0 & 0x40000000 else 0) | (0x10 if v0 & 0x20000000 else 0)
+                        # like the firmware: listen-only unless TX is switched on
+                        flags = (1 if v0 & 0x40000000 else 0) | (0 if self.tx_on else 0x10)
                         self.send(b"\xF1\x06" + struct.pack("<BIBI", flags, v0 & 0x0FFFFFFF, 0, 0))
                     elif c == 0x07:
                         self.send(b"\xF1\x07" + struct.pack("<HBBBB", 618, 1, 0, 0, 0))
@@ -132,10 +135,16 @@ def test_connect_capture_mark_and_tx(env):
 
     with pytest.raises(PermissionError):
         sn.send_frame(0x3E5, b"\x01", False, 1, 0)
-    assert "TX enabled" in sn.enable_tx(True)
-    assert "sent 2x 123#AABB" in sn.send_frame(0x123, b"\xAA\xBB", False, 2, 10)
+    armed = sn.enable_tx(True)
+    assert "TX armed" in armed and "listen-only" in armed
+    assert not dev.tx_on  # arming alone keeps the device listen-only
+    res = sn.send_frame(0x123, b"\xAA\xBB", False, 2, 10)
+    assert "sent 2x 123#AABB" in res
+    assert "after burst: bus params: can0: enabled, 100000 bit/s, listen-only" in res
     _real_sleep(0.1)
     assert dev.received_tx[0] == b"\xF1\x00\x23\x01\x00\x00\x00\x02\xAA\xBB"
+    assert dev.tx_mode_at_send == [True, True]  # normal mode during the burst
+    assert not dev.tx_on  # back to listen-only afterwards
 
     assert "3E5" in sn.tail(3, "3e5")
     assert "distinct IDs" in sn.stats(1.0)
