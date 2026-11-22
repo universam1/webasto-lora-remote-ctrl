@@ -131,6 +131,8 @@ Bus errors stayed at 1–2 in all tests. No frames were missed.
 - Fuel use at full load was 16 ml in 97 s, about **0.6 l/h**. This fits a Thermo Top of
   about 5 kW.
 - About 40 s pass from the command to ignition: priming, then glow.
+- The roof unit displayed a run time of **30 min** for this CAN start, which is the
+  default run time. The roof unit applies its own preset to a start via 0x5D3.
 
 ## Other IDs
 
@@ -186,8 +188,9 @@ Bus errors stayed at 1–2 in all tests. No frames were missed.
    sleep deeper. The test is planned; keep the laptop from suspending
    (`systemd-inhibit --what=sleep:idle sleep infinity`).
 2. **Fault memory**, address 18 (Standheizung): read it with VCDS after the tests.
-3. **Run time and timer:** how the roof unit sets them. 0x5D3 byte 1 was always `00`. Which
-   default run time applies to a CAN start?
+3. **Run time and timer:** how the roof unit sets them. 0x5D3 byte 1 was always `00`.
+   A CAN start runs with the roof unit's preset (30 min shown). Changing the run time on the
+   panel has not been captured yet.
 4. **Status poll without side effects**, see the receiver section.
 5. Who sends 0x5D3: roof unit or J533? This matters only if the sender behaves differently
    with the ignition on or off.
