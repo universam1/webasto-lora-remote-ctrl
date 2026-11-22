@@ -5,7 +5,7 @@ ESP32 CAN sniffer while you operate the Webasto heater control panel (VW T5.2), 
 analyse the recordings.
 
 The sniffer firmware speaks the **GVRET binary protocol** (the same as SavvyCAN uses) over USB
-serial at 1,000,000 baud, plus two vendor commands (`F1 40` status, `F1 41` TX enable).
+serial at 921600 baud (the CP2102 cannot do 1 Mbaud cleanly; in SavvyCAN pick 921600 or 1000000, Linux rounds it), plus two vendor commands (`F1 40` status, `F1 41` TX enable).
 
 ## Installation
 

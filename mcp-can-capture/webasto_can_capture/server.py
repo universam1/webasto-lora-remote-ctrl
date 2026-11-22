@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)  # stderr; stdout belongs to the MCP tra
 logger = logging.getLogger("webasto-can-capture")
 
 DEFAULT_PORT = "/dev/ttyCANSNIFF"
-SERIAL_BAUD = 1_000_000
+SERIAL_BAUD = 921_600  # CP2102 cannot do 1 Mbaud; firmware uses 921600
 RING_SIZE = 200_000
 STATUS_POLL_S = 1.0
 REPLY_TIMEOUT_S = 1.0
@@ -521,7 +521,7 @@ async def _run(fn, *args) -> str:
 
 @mcp.tool()
 async def connect(port: str = DEFAULT_PORT, bitrate: int = 100000) -> str:
-    """Open the ESP32 GVRET CAN sniffer over USB serial (1 Mbaud), enter binary mode and
+    """Open the ESP32 GVRET CAN sniffer over USB serial (921600 baud), enter binary mode and
     configure can0 at `bitrate` in listen-only mode. Returns device info and bus params."""
     return await _run(sniffer.connect, port, bitrate)
 

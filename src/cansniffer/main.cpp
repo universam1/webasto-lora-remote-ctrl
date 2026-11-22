@@ -5,7 +5,9 @@
 //   CAN_RS_PIN -> transceiver Rs (HIGH = standby/driver off, LOW = normal).
 //   Do NOT add a 120 ohm terminator when tapping the vehicle bus.
 //
-// Host protocol: GVRET (SavvyCAN compatible, 1 Mbaud serial).
+// Host protocol: GVRET (SavvyCAN compatible), 921600 baud serial.
+//   The CP2102 on the DevKit cannot do 1 Mbaud exactly (garbled output);
+//   Linux rounds a 1 Mbaud request (SavvyCAN default) down to 921600.
 //   Before the host sends E7 E7 the device is in text mode (human readable,
 //   type "help"). After E7 E7 it speaks binary GVRET until reset.
 //
@@ -33,7 +35,7 @@
 #define CAN_ALLOW_TX 0
 #endif
 #ifndef SNIFFER_SERIAL_BAUD
-#define SNIFFER_SERIAL_BAUD 1000000
+#define SNIFFER_SERIAL_BAUD 921600
 #endif
 
 static constexpr uint16_t kBuildNumber = 1;
