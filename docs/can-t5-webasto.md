@@ -71,6 +71,17 @@ Idle example `00 00 00 40 00 4C 00 00` (9 °C).
 | vent on (450.3 s) | `00 00` → `04 00` | +13 ms: byte 1 `09`, byte 7 `01` (ventilation) | → `01` |
 | vent off (484.1 s) | `04 00` → `00 00` | +82 ms: ventilation off | → `00` |
 
+**Repeat run** (`roof_panel_actions_2`, 156 s, clean sequence with markers before each press):
+
+| Event | 0x5D3 | 0x3E5 reaction |
+|---|---|---|
+| heat on (25.9 s) | `00 00` → `02 00` | +67 ms |
+| heat off (82.9 s) | `02 00` → `00 00` | +178 ms |
+| vent on (114.6 s) | `00 00` → `04 00` | +59 ms |
+| vent off (142.8 s) | `04 00` → `00 00` | +65 ms |
+
+Both runs agree: 8 of 8 transitions. No other ID changes with these events.
+
 Hypothesis: 0x5D3 byte 0 = requested mode (0x00 off, 0x02 heat, 0x04 vent), sent by the
 roof control unit (or forwarded by J533). 0x3E3 byte 4 looks like a "heater active" echo.
 Open: who sends 0x5D3, run time/timer encoding, whether a foreign sender is accepted while
