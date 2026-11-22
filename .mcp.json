@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "webasto-can-capture": {
+      "command": "/home/sam/src/webasto-lora-remote-ctrl/mcp-can-capture/venv/bin/python",
+      "args": ["-m", "webasto_can_capture"]
+    }
+  }
+}

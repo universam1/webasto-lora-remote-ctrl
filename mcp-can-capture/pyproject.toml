@@ -1,0 +1,32 @@
+[project]
+name = "webasto-can-capture"
+version = "0.1.0"
+description = "MCP server for recording and analysing CAN traffic via an ESP32 GVRET sniffer"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2,<2",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+webasto-can-capture = "webasto_can_capture.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webasto_can_capture"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']

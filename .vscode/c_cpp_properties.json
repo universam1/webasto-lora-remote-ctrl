@@ -489,7 +489,7 @@
                 ]
             },
             "defines": [
-                "PLATFORMIO=60118",
+                "PLATFORMIO=60200",
                 "ARDUINO_TTGO_LoRa32_V1",
                 "CORE_DEBUG_LEVEL=0",
                 "LORA_FREQUENCY_HZ=433E6",

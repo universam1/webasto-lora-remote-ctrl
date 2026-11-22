@@ -1,5 +1,7 @@
 # Webasto ThermoTop C LoRa Remote (TTGO LoRa32 SX1276 OLED)
 
+![Test setup](dev-setup.jpg)
+
 Two TTGO LoRa32 SX1276 OLED boards:
 
 - **Sender**: sends `start`, `stop`, `run <minutes>` over LoRa; shows receiver/heater status on OLED.
