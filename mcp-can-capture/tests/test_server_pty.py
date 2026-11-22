@@ -12,8 +12,37 @@ import pytest
 from webasto_can_capture import analysis, server
 
 
+class FakePanel:
+    """Roof control unit: sends 0x5D3 [byte, 00] every `period_s` and adopts our 0x5D3 value
+    after `adopt_after` received frames with that value, but only if bit 7 matches its current
+    byte and `accept(value)` allows it. With `asleep=True` it stays silent until the first
+    received 0x5D3 (bus wake-up)."""
+
+    def __init__(self, byte=0x80, period_s=0.1, adopt_after=3, accept=None, asleep=False):
+        self.byte = byte
+        self.period_s = period_s
+        self.adopt_after = adopt_after
+        self.accept = accept or (lambda v: True)
+        self.asleep = asleep
+        self.counts = {}
+        self.last_sent = 0.0
+        self.sent = []  # bytes 0 of the panel frames sent
+
+    def on_tx(self, value):
+        """Called for each received TX 0x5D3; returns True if the panel adopted the value now."""
+        self.asleep = False
+        if value == self.byte or (value & 0x80) != (self.byte & 0x80) or not self.accept(value):
+            return False
+        self.counts[value] = self.counts.get(value, 0) + 1
+        if self.counts[value] >= self.adopt_after:
+            self.byte = value
+            self.counts.clear()
+            return True
+        return False
+
+
 class FakeDevice(threading.Thread):
-    def __init__(self, tx_allowed=True):
+    def __init__(self, tx_allowed=True, panel=None):
         super().__init__(daemon=True)
         self.master, slave = pty.openpty()
         tty.setraw(slave)
@@ -30,6 +59,20 @@ class FakeDevice(threading.Thread):
         # (can_id, payload) sent every 10 ms once in binary mode; tests may replace it
         self.frames = [(0x3E5, bytes([0x04, 0x05, 0, 0, 0, 0xA0, 1, 0]))]
         self.lock = threading.Lock()
+        self.panel = panel
+
+    def send_frame(self, can_id, data):
+        hdr = struct.pack("<IIB", self.ts, can_id, len(data))
+        self.send(b"\xF1\x00" + hdr + data + b"\x00")
+
+    def panel_tick(self, force=False):
+        p = self.panel
+        if p is None or p.asleep or not self.binary:
+            return
+        if force or time.time() - p.last_sent >= p.period_s:
+            p.last_sent = time.time()
+            p.sent.append(p.byte)
+            self.send_frame(0x5D3, bytes([p.byte, 0]))
 
     def send(self, b):
         with self.lock:
@@ -75,9 +118,17 @@ class FakeDevice(threading.Thread):
                     if len(buf) < 8 or len(buf) < 8 + buf[7]:
                         break
                     n = 8 + buf[7]
-                    self.received_tx.append(bytes(buf[:n]))
+                    pkt = bytes(buf[:n])
+                    self.received_tx.append(pkt)
                     self.tx_mode_at_send.append(self.tx_on)
                     del buf[:n]
+                    can_id = struct.unpack("<I", pkt[2:6])[0]
+                    if self.panel and self.tx_on and can_id == 0x5D3 and n > 8:
+                        woke = self.panel.asleep
+                        if self.panel.on_tx(pkt[8]):
+                            self.panel_tick(force=True)  # the panel sends the adopted value itself
+                        elif woke:
+                            self.panel_tick(force=True)  # bus wakes: panel's first frame follows
                 else:
                     del buf[:2]
                     if c == 0x01:
@@ -97,8 +148,8 @@ class FakeDevice(threading.Thread):
                 last_frame = time.time()
                 self.ts += 10_000
                 for can_id, data in list(self.frames):
-                    hdr = struct.pack("<IIB", self.ts, can_id, len(data))
-                    self.send(b"\xF1\x00" + hdr + data + b"\x00")
+                    self.send_frame(can_id, data)
+            self.panel_tick()
 
     def stop(self):
         self.running = False
@@ -177,3 +228,134 @@ def test_mark_event_without_capture(env):
     sn, _, _ = env
     with pytest.raises(RuntimeError):
         sn.mark_event("x")
+
+
+# ---------------------------------------------------------------------- set_heater_mode
+
+
+@pytest.fixture
+def panel_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "CAPTURES_DIR", tmp_path)
+    monkeypatch.setattr(server.time, "sleep", _fast_sleep)
+    made = []
+
+    def make(panel, frames=None):
+        dev = FakeDevice(panel=panel)
+        dev.frames = frames if frames is not None else []
+        dev.start()
+        sn = server.CanSniffer()
+        sn.connect(dev.port, 100000)
+        made.append((sn, dev))
+        return sn, dev
+
+    yield make
+    for sn, dev in made:
+        sn.disconnect()
+        dev.stop()
+
+
+def _tx_bytes0(dev):
+    """Byte 0 of every 0x5D3 frame the sniffer transmitted."""
+    return [p[8] for p in dev.received_tx if struct.unpack("<I", p[2:6])[0] == 0x5D3]
+
+
+def _wait_panel(sn, timeout=3.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if sn._last_panel_mode():
+            return
+        _real_sleep(0.02)
+    raise AssertionError("no panel 0x5D3 received")
+
+
+def test_heater_mode_refused_without_enable_tx(panel_env):
+    sn, dev = panel_env(FakePanel(byte=0x80))
+    _wait_panel(sn)
+    with pytest.raises(PermissionError, match="enable_tx"):
+        sn.set_heater_mode("heat")
+    assert dev.received_tx == [] and not dev.tx_on
+    sn.enable_tx(True)
+    with pytest.raises(ValueError):
+        sn.set_heater_mode("turbo")
+
+
+def test_heat_adopted_after_three_frames(panel_env):
+    panel = FakePanel(byte=0x80, adopt_after=3)
+    sn, dev = panel_env(panel)
+    _wait_panel(sn)
+    sn.enable_tx(True)
+    sn.start_capture("heat")
+    dev.frames = [(0x3E5, bytes.fromhex("00 08 00 40 00 70 00 00"))]
+
+    def heater_follows():  # 0x3E5 shows the control LED once the panel requests heat
+        while dev.running:
+            if panel.byte & 0x7F == 0x02:
+                dev.frames = [(0x3E5, bytes.fromhex("00 0A 01 40 44 65 02 00"))]
+            _real_sleep(0.02)
+
+    threading.Thread(target=heater_follows, daemon=True).start()
+    res = sn.set_heater_mode("heat", interval_ms=200)
+    assert res["ok"] is True, res
+    assert res["frames_sent"] == 3
+    assert res["target_byte"] == "0x82" and res["panel_before"] == "0x80" and res["panel_after"] == "0x82"
+    assert res["adopted_after_ms"] is not None and res["adopted_after_ms"] >= 0
+    assert res["heater_confirmed"] is True
+    assert "adopted by roof unit" in res["message"]
+    _real_sleep(0.1)
+    assert _tx_bytes0(dev) == [0x82] * 3
+    assert dev.tx_mode_at_send == [True] * 3
+    assert not dev.tx_on  # listen-only afterwards
+    bp = sn._request(server.gvret.cmd(server.gvret.CMD_GET_BUS_PARAMS), server.gvret.BusParams)
+    assert bp.can0_listen_only
+    out = sn.stop_capture()
+    assert "3 Tx frames" in out
+
+
+@pytest.mark.parametrize("panel_byte,expected", [(0x80, 0x82), (0x00, 0x02)])
+def test_bit7_mirrored(panel_env, panel_byte, expected):
+    sn, dev = panel_env(FakePanel(byte=panel_byte, adopt_after=2))
+    _wait_panel(sn)
+    sn.enable_tx(True)
+    res = sn.set_heater_mode("heat", interval_ms=200)
+    assert res["ok"] is True, res
+    assert res["target_byte"] == f"0x{expected:02X}"
+    assert set(_tx_bytes0(dev)) == {expected}
+
+
+def test_vent_rejected_reports_not_adopted(panel_env):
+    panel = FakePanel(byte=0x80, adopt_after=1, accept=lambda v: v != 0x84)
+    sn, dev = panel_env(panel)
+    _wait_panel(sn)
+    sn.enable_tx(True)
+    res = sn.set_heater_mode("vent", max_frames=4, interval_ms=150)
+    assert res["ok"] is False, res
+    assert res["frames_sent"] == 4 and res["adopted_after_ms"] is None
+    assert res["target_byte"] == "0x84" and res["panel_after"] == "0x80"
+    assert "not adopted by roof unit" in res["message"]
+    _real_sleep(0.1)
+    assert _tx_bytes0(dev) == [0x84] * 4
+    assert not dev.tx_on
+
+
+def test_sleeping_bus_uses_wake_frame(panel_env):
+    # nothing in the ring; the panel wakes on our first frame and sends 0x00 (bit 7 clear)
+    panel = FakePanel(byte=0x00, adopt_after=2, asleep=True)
+    sn, dev = panel_env(panel)
+    _real_sleep(0.3)
+    assert sn._last_panel_mode() is None
+    sn.enable_tx(True)
+    res = sn.set_heater_mode("heat", interval_ms=200)
+    assert res["ok"] is True, res
+    tx = _tx_bytes0(dev)
+    assert tx[0] == 0x82  # wake frame: default bit 7 = 0x80
+    assert tx[1:] == [0x02, 0x02]  # then bit 7 from the panel's first frame
+    assert res["target_byte"] == "0x02" and res["panel_before"] == "0x00"
+    assert res["frames_sent"] == 3
+    assert "Wake frame" in res["message"]
+    assert not dev.tx_on
+
+
+def test_send_frame_unaffected_by_panel(panel_env):
+    sn, dev = panel_env(FakePanel(byte=0x80))
+    sn.enable_tx(True)
+    assert "sent 1x 5D3#8200" in sn.send_frame(0x5D3, b"\x82\x00", False, 1, 0)

@@ -3,17 +3,20 @@
 Vehicle: VW T5.2, built 2013, factory water heater (WWZH, Webasto Thermo Top),
 roof control unit 7E7906453C (heat, ventilate, timer).
 
-**Status 2026-11-22: the heater can be switched on, ventilated and switched off over CAN.**
-The ESP32 sends 0x5D3 at the radio connector. This works with the ignition on or off, and
-it works when the bus is asleep. Verified in the car; the open points are listed below.
+**Status 2026-11-22 (evening): heat on and off work over CAN; ventilate-on currently does
+not.** The ESP32 sends 0x5D3 at the radio connector, with the ignition on or off and with
+the bus asleep. Since about 22:30 the roof unit sets bit 7 in 0x5D3 byte 0 (`80/82/84`).
+Commands must mirror that bit and be repeated until the roof unit echoes them. In this
+`8x` state the roof unit never adopts ventilate (`84`) from CAN. Verified in the car; the
+open points are listed below.
 
 ## Quick reference
 
 | Purpose | ID | Payload | Notes |
 |---|---|---|---|
-| Heat on | 0x5D3 | `02 00` | send 3×, 500 ms apart |
-| Ventilate on | 0x5D3 | `04 00` | same |
-| Off | 0x5D3 | `00 00` | same |
+| Heat on | 0x5D3 | `02 00` / `82 00` | bit 7 as the roof unit currently sends it; repeat every 500 ms until the roof unit echoes it, max about 10× |
+| Ventilate on | 0x5D3 | `04 00` / `84 00` | `04` worked in the `00` state; `84` was never adopted in the `8x` state |
+| Off | 0x5D3 | `00 00` / `80 00` | as heat on |
 | Heater status | 0x3E5 | 8 bytes | every 200 ms while the bus is awake, see layout |
 | Heater active echo | 0x3E3 | byte 4 `01`/`00` | about 40–120 ms after 0x3E5 |
 
@@ -46,17 +49,25 @@ The bus runs at 100 kbit/s. Tap point: radio Quadlock **A9 = CAN-H, A10 = CAN-L*
 | Ignition off, just after locking | about 147 | 45 |
 | Asleep | 0 | 0 |
 
-- **The bus falls asleep** about 20 s after the last activity.
+- **The bus falls asleep** about 20 s after a mode change. A wake-up without a mode change
+  (a 0x5D3 equal to the current value, the 0x3E5 spoof, the heater's own wake-ups) keeps it
+  awake for only about 5.3 s.
   - The heater does **not** keep the bus awake. It keeps running while the bus sleeps.
     In the 2 min test, fuel went from 0 to 10 ml while the bus was silent.
-  - During its run-on, the heater wakes the bus by itself for about 10 s at a time.
+  - During its run-on, the heater wakes the bus by itself for about 5 s at a time; the
+    first frame is then 0x427.
 - **A single 0x5D3 frame wakes the bus.**
   - Gateway and control units start sending within about 3 ms.
   - No separate network-management or wake-up frame is needed.
 - **J533 forwards traffic in both directions** between the radio bus and the heater:
   - The heater's 0x3E5 status reaches the radio.
   - Our 0x5D3 from the radio side reaches the heater.
-- **Opening the car** (door or remote) wakes the bus.
+- **Opening the car** (door or remote) wakes the bus. A panel press on a sleeping bus also
+  starts with another ECU (first frame 0x438), not with 0x5D3.
+- **Every wake-up**, independent of the mode, shows the same pattern in all evening captures:
+  0x665 byte 0 goes `00` → `80`, and 0x3E1 goes from `C0 …` to `E0 … FA …` (byte 4 `FA`,
+  later `00`). With the ignition on, 0x665 is `80` and 0x3E1 `20 …` throughout.
+- Sending into a sleeping bus is fine: our frame is ACKed and wakes the bus.
 
 ## 0x3E5, heater status
 
@@ -65,7 +76,7 @@ On our T5.2, bytes 1, 2/3, 4, 5, 6 and 7 are confirmed by observation.
 
 | Byte (0-based) | Content | Confirmed on T5.2 |
 |---|---|---|
-| 0 | b0 on via radio, b1 off via radio, b2 heating on, b3 ventilation on, b4 A/C off, b5 heater mode activating, b6 programming, b7 wake Komfort-CAN | always `00` so far |
+| 0 | b0 on via radio, b1 off via radio, b2 heating on, b3 ventilation on, b4 A/C off, b5 heater mode activating, b6 programming, b7 wake Komfort-CAN | always `00` (6115 frames in all captures); see below |
 | 1 | b0 vehicle blower, b1 control LED (heater requested), b2 combustion, b3 water pump request, b4-6 error (0 none, 1 battery low, 2 low fuel, 3 defective, 4 crash, 5 other, 6 overheat), b7 error stored | b0 (ventilation), b1, b3 |
 | 2–3 | fuel used, u16 LE, low 14 bits = ml; b14 parking heater (always 1), b15 Kl.30 lost | yes, counts ml |
 | 4 | heating power, raw (0x44 at ignition, 0xF1 = 241 full load, 0x51/0x5A partial) | yes |
@@ -86,10 +97,21 @@ Typical payloads:
 The fuel counter starts at 0 for each heater run. It is not reset by switching off; the
 run-on above still shows `0A` = 10 ml.
 
+**Byte 0 is not a command path.** The forum numbers bytes from 1, so its "Byte 1" is our
+byte 0. There, bit 7 is "Komfort CAN aufwecken", and bits 0–3 (on, off, heating,
+ventilation via radio) are sent 5× each. Test (`off_retry`, marker `tx_3e5_wake_vent`):
+5× `3E5 89 00 00 40 00 92 02 00` at 100 ms (wake + on via radio + ventilation, the other
+bytes copied from the real frame).
+- The bus woke, the roof unit stayed at `80`, the real 0x3E5 showed no ventilation, and no
+  extra bus errors occurred.
+- These bits are most likely heater-side reports of externally triggered starts (radio,
+  W-Bus). Spoofing 0x3E5 is not useful.
+
 ## 0x5D3, requested mode
 
 DLC 2, cyclic every 500 ms. The sender is probably the roof unit, possibly relayed by J533.
-Byte 0 is the mode: `00` off, `02` heat, `04` ventilate. Byte 1 was always `00`.
+Byte 0 is the mode: `00` off, `02` heat, `04` ventilate, plus bit 7 (see below). Byte 1 was
+always `00`; the run time is not in this frame.
 
 **Reading the roof unit.** Two capture runs at the radio covered all operations: heat on/off
 and ventilate on/off, 8 of 8 transitions.
@@ -97,13 +119,42 @@ and ventilate on/off, 8 of 8 transitions.
 - No other ID changed with these events.
 - Captures: `roof_panel_actions`, `roof_panel_actions_2`.
 
-**Sending.** Send 3× `5D3 <mode> 00`, 500 ms apart. The device stays in normal mode only for
-the burst.
-- After our frame, the original sender adopts the new mode and keeps sending it. A short
-  burst is therefore enough, and there is no need to keep sending.
-- The original sender keeps transmitting its old value for 0.5–1 s. During that time the
-  LED can flicker once. This is harmless; the heater ends up in the commanded state.
-- Results:
+**Byte 0 bit 7 (`0x80`).** Meaning unknown.
+- Until `heat_2min` (ends 22:16) the roof unit sent `00/02/04`. From `vent_manual`
+  (22:30) on it sends `80/82/84`. In between came several rapid dashboard commands
+  (vent, vent, heat, off within about 50 s), not captured.
+- A heat start from the panel at 22:33 kept the bit: `80` → `82` (`vent_manual`, 128.6 s;
+  the bus was woken by 0x438, 0x3E5 LED on 0.16 s later).
+- Only commands whose bit 7 matches the roof unit's current value are adopted. In
+  `vent_manual`, 3× `04 00` while the roof unit sent `80`: 0x3E5 showed ventilation from
+  0.57 to 1.37 s, then the roof unit's `80` won. The dashboard showed this as "starts 3×
+  briefly and aborts".
+
+**Sending.** Repeat `5D3 <mode | bit 7> 00` every 500 ms until the roof unit sends the same
+value, then stop. The device stays in normal mode only for the burst.
+- After adoption the roof unit keeps sending the new mode, so no keep-alive is needed.
+- A single frame is not enough: the heater reacts for about 0.4 s, then the roof unit's next
+  frame overrides it (`bit7_tests`, `tx_heat_bit7_once`).
+- When a command was adopted, the roof unit echoed it on the 2nd–4th frame:
+
+| Capture, marker | Command | Adopted |
+|---|---|---|
+| `bit7_tests`, `tx_heat_bit7_10x` | 10× `82 00` | 3rd frame, heater on |
+| `bit7_tests`, `tx_off_bit7_10x` | 10× `80 00` during full load | **never**, the roof unit stayed `82` |
+| `off_retry` (start, 72 s later) | 10× `80 00` | 4th frame, off |
+| `vent_manual`, `tx_off_bit7` | 3× `80 00` | 2nd frame, off |
+| `panel_vent`, `tx_vent_off_80` | 10× `80 00` | 3rd frame, ventilation off |
+| `off_retry`, `tx_vent_bit7_10x` | 10× `84 00`, 500 ms, run-on | never; ventilation on for about 0.2–0.4 s per frame |
+| `off_retry`, `tx_vent_bit7_200ms` | 25× `84 00`, 200 ms, after run-on | never; ventilation toggles on/off every 200 ms |
+
+  In the morning (`00` state) `04 00` worked. In the `8x` state, ventilate-on over CAN failed
+  both during and after the water-pump run-on.
+
+**Ventilation from the panel** (`panel_vent`): another ECU woke the bus (first frame 0x438).
+The roof unit sent `80`, then `84` 0.5 s later. 0x3E5 showed ventilation 0.17 s after that,
+with byte 0 still `00`. The panel showed **120 min**.
+
+**Earlier results** (all in the `00` state, 3 frames):
 
 | Test | Condition | Result |
 |---|---|---|
@@ -130,14 +181,44 @@ Bus errors stayed at 1–2 in all tests. No frames were missed.
 - Coolant rose about 0.25 K/s at full load.
 - Fuel use at full load was 16 ml in 97 s, about **0.6 l/h**. This fits a Thermo Top of
   about 5 kW.
+
+**Power value (0x3E5 byte 4) to watts.** I measured the time between two 1 ml steps of the
+fuel counter, using only intervals without a bus gap (`roof_panel_actions`,
+`bit7_tests`). The fuel rate is proportional to the raw value:
+
+| Power raw | Interval per 1 ml | Fuel rate | ml/h per step |
+|---|---|---|---|
+| 90 | 16.6 s | 217 ml/h | 2.41 |
+| 100 | 14.8 s | 243 ml/h | 2.43 |
+| 241 (full load) | 6.2 s | 580 ml/h | 2.41 |
+
+- Fuel rate ≈ **2.41 ml/h × raw**. The relation is linear through zero.
+- Diesel holds about 9.95 Wh/ml, so one step is about **24 W of fuel energy**. Raw 241 is
+  about 5.8 kW fuel energy.
+- Assuming the heater delivers its nominal 5 kW at 0.58–0.61 l/h, the heat output is about
+  **20.7 W per step**: raw 241 ≈ 5.0 kW, raw 90 ≈ 1.9 kW. That puts the efficiency at about
+  86 %.
+- The forum's "1 W steps" (T5.1) does not fit, because that would cap the heater at 255 W.
+- The fuel counter is the more direct measurement. The watt figure is an estimate that
+  depends on the nominal rating.
 - About 40 s pass from the command to ignition: priming, then glow.
-- The roof unit displayed a run time of **30 min** for this CAN start, which is the
-  default run time. The roof unit applies its own preset to a start via 0x5D3.
+
+Run times shown on the panel:
+
+| Start | Run time |
+|---|---|
+| Heat via 0x5D3 | 30 min |
+| Heat from the panel | 20 min |
+| Ventilate from the panel | 120 min |
+
+The run time is not in 0x5D3 (byte 1 always `00`). The roof unit applies its own value.
 
 ## Other IDs
 
 - **0x3E1** (`20 00 10 00 xx …`, 100 ms): changes when the **vehicle blower** is operated.
-  It is not heater related. 0x5E1 byte 0 bit 7 toggles together with it.
+  It is not heater related. 0x5E1 byte 0 bit 7 toggles together with it. With the ignition
+  off it starts as `C0 …` / `E0 … FA` on each wake-up, see Bus behaviour.
+- **0x665** byte 0: `00` → `80` on each wake-up, not mode specific.
 - **0x3E3** byte 4: `01` while the heater is active. It follows 0x3E5 and looks like an
   echo or ack.
 - **0x62C, 0x63B, 0x66F, 0x6D2, 0x6DA**: variable DLC and content. Probably radio or cluster
@@ -165,34 +246,46 @@ Bus errors stayed at 1–2 in all tests. No frames were missed.
   3. Then diff ±15 s around the marker.
   
   Pressing first and marking afterwards misses the transition.
+- Dashboard: `venv/bin/python -m webasto_can_capture.dashboard --port /dev/ttyCANSNIFF --allow-tx`.
 - Only one program can use the serial port at a time: the MCP server, SavvyCAN or the
-  dashboard.
+  dashboard. The dashboard only works while the MCP server is disconnected.
+- Once the serial link stalled right after a TX (`vent_manual`, 246.9 s, the capture ends
+  there). A reset (RST) of the S2 fixed it.
 
 ## Implications for the receiver (TTGO, replacing W-Bus)
 
 - The receiver needs an SN65HVD230 on free GPIOs (21/22 on the TTGO LoRa32). It taps the
   radio connector or the Komfort-CAN.
-- Start, ventilate and stop are each 3 frames of 0x5D3. Keep-alive and renewal as with W-Bus
-  are not needed. The heater uses its own default run time.
-- To read the status, the receiver wakes the bus with one frame and then reads 0x3E5 for
-  about 1 s. The open question is which frame to send for that without side effects.
-  Candidate: repeat the current mode in 0x5D3; this worked in `heat_2min` at 163 s.
-- Do not keep the bus awake permanently, because of the starter battery. At about 20 s per
-  status poll, poll rarely.
+- Command algorithm:
+  1. Wake the bus and read the roof unit's current 0x5D3 to get bit 7.
+  2. Send `5D3 <mode | bit 7> 00` every 500 ms until the roof unit echoes that value.
+  3. Stop after the echo, or after about 10 frames, and report failure. Check 0x3E5 too.
+  Keep-alive and renewal as with W-Bus are not needed. The roof unit applies its own run
+  time.
+- Ventilation may need W-Bus or the panel, as long as `84` is rejected in the `8x` state.
+- Status poll: send one 0x5D3 equal to the roof unit's current value (`wake_neutral` in
+  `off_retry`: `80 00`). It wakes the bus without changing the mode; then read 0x3E5. The
+  bus sleeps again after about 5 s. The value must be known from the last poll; a wrong
+  bit 7 or mode briefly switches the heater (see above).
+- Do not keep the bus awake permanently, because of the starter battery. Poll rarely.
 - The transceiver TX pin must be recessive (HIGH) from power-up. A pull-up of about 10 kΩ
   from CTX to 3.3 V is recommended, so that a reset cannot wake or disturb the bus.
 
 ## Open
 
-1. **Long sleep:** does one frame still wake the bus after hours or overnight? The gateway may
+1. **0x5D3 bit 7:** what it means, what set it, and how to get back to `00`. Candidates:
+   ignition on/off, the panel menu, a long sleep.
+2. **Ventilate in the `8x` state:** why the roof unit rejects `84` from CAN while it
+   accepts `82` and `80`.
+3. **Off not adopted once** (`bit7_tests`, `tx_off_bit7_10x`, 10× `80` during full load);
+   72 s later the same command worked. Cause unknown.
+4. **Long sleep:** does one frame still wake the bus after hours or overnight? The gateway may
    sleep deeper. The test is planned; keep the laptop from suspending
    (`systemd-inhibit --what=sleep:idle sleep infinity`).
-2. **Fault memory**, address 18 (Standheizung): read it with VCDS after the tests.
-3. **Run time and timer:** how the roof unit sets them. 0x5D3 byte 1 was always `00`.
-   A CAN start runs with the roof unit's preset (30 min shown). Changing the run time on the
-   panel has not been captured yet.
-4. **Status poll without side effects**, see the receiver section.
-5. Who sends 0x5D3: roof unit or J533? This matters only if the sender behaves differently
+5. **Run time per mode and timer:** where the roof unit takes 30/20/120 min from, and whether
+   they can be changed in the panel menu. Not in 0x5D3.
+6. **Fault memory**, address 18 (Standheizung): read it with VCDS after the tests.
+7. Who sends 0x5D3: roof unit or J533? This matters only if the sender behaves differently
    with the ignition on or off.
 
 ## Background research (before the tests)
@@ -212,5 +305,5 @@ Bus errors stayed at 1–2 in all tests. No frames were missed.
 - Risks:
   - Keeping the bus awake drains the starter battery.
   - Odd CAN signals can lead to heater faults 49/53 and a locked heater.
-  - Spoofing 0x3E5 collides with the real heater.
+  - Spoofing 0x3E5 collides with the real heater (a 5× test had no visible effect, see 0x3E5).
   - Never add a terminator.

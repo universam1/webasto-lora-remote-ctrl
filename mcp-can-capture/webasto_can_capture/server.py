@@ -45,6 +45,14 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$")
 
 ESPRESSIF_USB_VID = 0x303A
 
+# VW T5.2 heater (Komfort-CAN)
+ID_MODE = 0x5D3  # requested mode, sent by the roof control unit every 500 ms
+ID_STATUS = 0x3E5  # heater status, every 200 ms
+HEATER_MODES = {"off": 0x00, "heat": 0x02, "vent": 0x04}  # 0x5D3 byte 0, bit 7 mirrors the panel
+PANEL_FRESH_S = 2.0  # a panel 0x5D3 younger than this gives bit 7 without a wake frame
+WAKE_WAIT_S = 0.6  # after the wake frame, wait this long for the panel's first 0x5D3
+HEATER_CONFIRM_S = 1.5  # after adoption, watch 0x3E5 this long for confirmation
+
 
 def _is_native_usb(port: str) -> bool:
     """True if `port` is an ESP32-S2/S3 native USB CDC port (Espressif VID)."""
@@ -560,6 +568,172 @@ class CanSniffer:
             lines.append(_fmt_status(st_after))
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------ heater mode (0x5D3)
+
+    def _last_panel_mode(self) -> _RxEntry | None:
+        """Newest panel (Rx) 0x5D3 frame in the ring buffer, or None."""
+        with self._lock:
+            for e in reversed(self.ring):
+                f = e.frame
+                if f.can_id == ID_MODE and not f.extended and f.direction == "Rx" and f.data:
+                    return e
+        return None
+
+    def _log_tx(self, can_id: int, extended: bool, data: bytes) -> None:
+        """Count a sent frame and write it into the active capture with Dir=Tx (as send_frame does)."""
+        self.tx_sent += 1
+        ts = None
+        if self.capture:
+            ts, _ = self.device_now_us()
+        with self._lock:
+            if self.capture and ts is not None:
+                self._write_capture_frame(Frame(ts, can_id, extended, "Tx", 0, bytes(data)))
+                self.capture.tx += 1
+
+    def set_heater_mode(self, mode: str, max_frames: int = 10, interval_ms: int = 500) -> dict[str, Any]:
+        """Request off / heat / vent from the roof control unit via 0x5D3 and verify it was adopted.
+
+        The roof unit ("panel") sends 0x5D3 every 500 ms. We send `5D3 <mode | panel bit 7> 00`
+        one frame per `interval_ms` until a panel frame carries exactly that byte 0, then stop.
+        The device is switched to normal mode once for the whole sequence and back to
+        listen-only in `finally`.
+        """
+        if mode not in HEATER_MODES:
+            raise ValueError(f"mode must be one of {', '.join(HEATER_MODES)}")
+        if not 1 <= max_frames <= 50:
+            raise ValueError("max_frames must be 1..50")
+        if not 50 <= interval_ms <= 5000:
+            raise ValueError("interval_ms must be 50..5000")
+        self._require()
+        st = self.state.status
+        if not self.tx_session_enabled:
+            raise PermissionError("TX not enabled in this session; call enable_tx(confirm=true) first")
+        if not st or not st.tx_allowed_by_firmware:
+            raise PermissionError("device status does not report tx_allowed_by_firmware")
+
+        mode_bits = HEATER_MODES[mode]
+        interval = interval_ms / 1000.0
+        last = self._last_panel_mode()
+        fresh = last is not None and time.time() - last.host_time <= PANEL_FRESH_S
+        panel_before = last.frame.data[0] if fresh and last else None
+        # bit 7 must match what the panel currently sends; otherwise it overwrites our frame
+        bit7 = (last.frame.data[0] & 0x80) if last else 0x80
+        bit7_known = fresh
+        target = mode_bits | bit7
+        first_target = target
+
+        frames_sent = 0
+        panel_after: int | None = None
+        adopted_at: float | None = None
+        t_first: float | None = None
+        seen = 0
+        heater_confirmed: bool | None = None
+
+        bp = self._set_device_tx(True)
+        if bp is None or bp.can0_listen_only:
+            self._set_device_tx(False)
+            raise RuntimeError("device did not leave listen-only mode; nothing sent")
+        try:
+            next_send = time.time()
+            while True:
+                now = time.time()
+                if frames_sent < max_frames and now >= next_send and adopted_at is None:
+                    data = bytes([target, 0x00])
+                    if t_first is None:
+                        seen = self.total_rx  # only frames after our first one count
+                    self._write(gvret.encode_tx_frame(ID_MODE, data, False))
+                    sent_at = time.time()
+                    frames_sent += 1
+                    self._log_tx(ID_MODE, False, data)
+                    if t_first is None:
+                        t_first = sent_at
+                        # sleeping bus: the panel's value is only known after our wake frame
+                        next_send = sent_at + (interval if bit7_known else max(interval, WAKE_WAIT_S))
+                    else:
+                        next_send = sent_at + interval
+                if t_first is not None:
+                    seen, new = self.rx_since(seen)
+                    for e in new:
+                        f = e.frame
+                        if f.can_id != ID_MODE or f.extended or f.direction != "Rx" or not f.data:
+                            continue
+                        b0 = f.data[0]
+                        panel_after = b0
+                        if not bit7_known:
+                            bit7_known = True
+                            if panel_before is None:
+                                panel_before = b0
+                            bit7 = b0 & 0x80
+                            target = mode_bits | bit7
+                            # first panel frame after waking: send the corrected frame right away
+                            next_send = min(next_send, max(e.host_time, t_first + interval))
+                        if b0 == target:
+                            adopted_at = e.host_time
+                            break
+                if adopted_at is not None:
+                    break
+                if frames_sent >= max_frames and time.time() >= next_send:
+                    break  # watched one full slot after the last frame
+                time.sleep(0.01)
+        finally:
+            self._set_device_tx(False)
+
+        ok = adopted_at is not None
+        if ok:
+            heater_confirmed = self._confirm_heater(mode, adopted_at)
+        cid_data = f"5D3#{target:02X}00"
+        panel_txt = f"0x{panel_after:02X}" if panel_after is not None else "none"
+        if ok:
+            ms = int(round((adopted_at - t_first) * 1000)) if t_first else 0
+            conf = {True: "confirmed by 0x3E5", False: "0x3E5 does not confirm yet", None: "no 0x3E5 seen"}[heater_confirmed]
+            message = (
+                f"{mode} ({cid_data}) adopted by roof unit after {frames_sent} frame(s), {ms} ms; {conf}. "
+                f"Vom Bedienteil übernommen nach {frames_sent} Frame(s)."
+            )
+        else:
+            ms = None
+            message = (
+                f"{mode} ({cid_data}) not adopted by roof unit after {frames_sent} frame(s); "
+                f"panel still sends {panel_txt}. Vom Bedienteil nicht übernommen."
+            )
+        if first_target != target:
+            message += f" Wake frame used 0x{first_target:02X}, panel bit 7 required 0x{target:02X}."
+        return {
+            "ok": ok,
+            "mode": mode,
+            "target_byte": f"0x{target:02X}",
+            "panel_before": None if panel_before is None else f"0x{panel_before:02X}",
+            "panel_after": None if panel_after is None else f"0x{panel_after:02X}",
+            "frames_sent": frames_sent,
+            "adopted_after_ms": ms,
+            "heater_confirmed": heater_confirmed,
+            "message": message,
+        }
+
+    def _confirm_heater(self, mode: str, since: float, timeout_s: float = HEATER_CONFIRM_S) -> bool | None:
+        """Watch 0x3E5 after adoption: heat -> control LED (byte1 b1), vent -> byte7 b0, off -> both 0.
+
+        True on the first matching 0x3E5 within `timeout_s`; False if 0x3E5 frames arrived but none
+        matched; None if no 0x3E5 arrived (e.g. heater not on the bus).
+        """
+        deadline = time.time() + timeout_s
+        seen_any = False
+        while True:
+            with self._lock:
+                recent = list(itertools.takewhile(lambda e: e.host_time >= since, reversed(self.ring)))
+            for e in reversed(recent):
+                f = e.frame
+                if f.can_id != ID_STATUS or f.extended or f.direction != "Rx":
+                    continue
+                seen_any = True
+                d = analysis.decode_3e5_payload(f.data)
+                led, vent = d["control_led"], d["ventilation_active"]
+                if (mode == "heat" and led) or (mode == "vent" and vent) or (mode == "off" and not led and not vent):
+                    return True
+            if time.time() >= deadline:
+                return False if seen_any else None
+            time.sleep(0.02)
+
 
 # ---------------------------------------------------------------------- formatting helpers
 
@@ -745,6 +919,28 @@ async def send_frame(id: str, data_hex: str, extended: bool = False, count: int 
 
     def work() -> str:
         return sniffer.send_frame(_parse_int(id), _parse_hex_data(data_hex), extended, count, max(0, interval_ms))
+
+    return await _run(work)
+
+
+@mcp.tool()
+async def set_heater_mode(mode: str, max_frames: int = 10) -> str:
+    """Switch the T5.2 parking heater via the roof control unit (0x5D3) and verify the result.
+    mode: "off", "heat" or "vent". Same TX gating as send_frame (enable_tx(confirm=true) first).
+
+    The roof unit sends 0x5D3 every 500 ms; byte 0 is 00/02/04 plus a panel-state flag in
+    bit 7 (0x80) that must match what the panel currently sends, otherwise our frame is
+    overwritten. This tool takes bit 7 from the last panel 0x5D3 (if younger than 2 s), or
+    sends one wake frame and waits up to 600 ms for the panel's value. It then sends
+    `5D3 <target> 00` once per 500 ms, normal mode for the whole sequence, until a panel 0x5D3
+    carries the target byte (typically after 1-4 frames), and stops. Fails with "not adopted
+    by roof unit" after max_frames (known: vent-on with bit 7 set is never adopted). After
+    adoption, 0x3E5 is checked (heat: control LED, vent: ventilation bit, off: both clear).
+    Returns JSON: ok, mode, target_byte, panel_before, panel_after, frames_sent,
+    adopted_after_ms, heater_confirmed, message."""
+
+    def work() -> str:
+        return json.dumps(sniffer.set_heater_mode(mode.strip().lower(), max(1, min(max_frames, 50))))
 
     return await _run(work)
 

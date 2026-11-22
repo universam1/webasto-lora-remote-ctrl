@@ -110,6 +110,8 @@ button:focus-visible { outline: 2px solid var(--s-coolant); outline-offset: 2px;
 button:disabled { cursor: not-allowed; opacity: 0.45; }
 #tx-reason { margin: 10px 0 0; color: var(--ink-2); font-size: 13px; }
 #cmd-result { margin: 6px 0 0; font-size: 13px; min-height: 1.4em; }
+#cmd-hint { display: none; margin: 8px 0 0; background: var(--crit-wash); color: var(--critical-text); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; }
+#panel-byte { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
 
 /* charts */
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
@@ -177,7 +179,7 @@ dialog button { padding: 10px 16px; min-height: 0; }
 
   <section class="tiles" aria-label="Messwerte">
     <div class="card tile"><div class="label">Kühlmittel</div><div class="value" id="v-coolant">–</div><div class="hint" id="h-coolant"></div></div>
-    <div class="card tile"><div class="label">Heizleistung</div><div class="value" id="v-power">–</div><div class="hint">Rohwert, Byte 4</div></div>
+    <div class="card tile"><div class="label">Heizleistung</div><div class="value" id="v-power">–</div><div class="hint" id="h-fuelrate">–</div><div class="hint" id="h-power">Rohwert, Byte 4</div></div>
     <div class="card tile"><div class="label">Kraftstoff verbraucht</div><div class="value" id="v-fuel">–</div><div class="hint">Zähler des Heizgeräts</div></div>
     <div class="card tile"><div class="label">Dosierpumpe</div><div class="value" id="v-fuelpump">–</div><div class="hint">Byte 6 Bit 0</div></div>
     <div class="card tile"><div class="label">Wasserpumpe</div><div class="value" id="v-waterpump">–</div><div class="hint">Byte 1 Bit 3</div></div>
@@ -185,7 +187,8 @@ dialog button { padding: 10px 16px; min-height: 0; }
   </section>
 
   <section class="card" aria-label="Befehle">
-    <h2>Befehle (0x5D3, 3 Frames im Abstand von 500 ms)</h2>
+    <h2>Befehle (0x5D3 alle 500 ms, bis das Bedienteil übernimmt, max. 10 Frames)</h2>
+    <p id="panel-byte">Bedienteil 0x5D3: –</p>
     <div class="buttons">
       <button type="button" data-mode="heat">Heizen</button>
       <button type="button" data-mode="vent">Lüften</button>
@@ -193,6 +196,7 @@ dialog button { padding: 10px 16px; min-height: 0; }
     </div>
     <p id="tx-reason"></p>
     <p id="cmd-result"></p>
+    <p id="cmd-hint" role="status"></p>
   </section>
 
   <section class="charts">
@@ -226,8 +230,8 @@ dialog button { padding: 10px 16px; min-height: 0; }
     <h2>Befehlsprotokoll (letzte 20)</h2>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Zeit</th><th>Befehl</th><th>Frame</th><th>Ergebnis</th></tr></thead>
-        <tbody id="log"><tr><td colspan="4" class="muted">Noch keine Befehle.</td></tr></tbody>
+        <thead><tr><th>Zeit</th><th>Befehl</th><th>Frame</th><th>Frames</th><th>Übernommen nach</th><th>Ergebnis</th></tr></thead>
+        <tbody id="log"><tr><td colspan="6" class="muted">Noch keine Befehle.</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -245,7 +249,7 @@ dialog button { padding: 10px 16px; min-height: 0; }
 <dialog id="dlg">
   <form method="dialog">
     <p id="dlg-text" style="margin-top:0"></p>
-    <p class="small muted" style="margin:0">Sendet 3× 0x5D3 auf den Komfort-CAN.</p>
+    <p class="small muted" style="margin:0">Sendet 0x5D3 auf den Komfort-CAN, bis das Bedienteil den Wert übernimmt (max. 10 Frames).</p>
     <div class="row">
       <button value="cancel" type="submit">Abbrechen</button>
       <button value="ok" type="submit" id="dlg-ok">Senden</button>
@@ -397,8 +401,8 @@ function hover(c, ev) {
 }
 const cCool = makeChart("c-coolant", "Kühlmittel", "var(--s-coolant)", "°C", 1, 170);
 cCool.minSpan = 10;
-const cPow = makeChart("c-power", "Heizleistung (roh)", "var(--s-power)", "", 0, 110);
-cPow.minSpan = 10; cPow.zero = true;
+const cPow = makeChart("c-power", "Heizleistung (geschätzt)", "var(--s-power)", "kW", 1, 110);
+cPow.minSpan = 1; cPow.zero = true;
 const cFuel = makeChart("c-fuel", "Kraftstoff", "var(--s-fuel)", "ml", 0, 110);
 cFuel.minSpan = 5;
 
@@ -423,7 +427,7 @@ function render(s) {
     $("state-label").textContent = STATE_DE[hz.state] || hz.state;
     $("state-error").textContent = err ? "Fehler " + hz.error.code + ": " + hz.error.text : "";
     const parts = [];
-    if (s.mode_5d3) parts.push("Anforderung 0x5D3: " + (MODE_DE[s.mode_5d3.mode] || s.mode_5d3.mode));
+    if (s.mode_5d3) parts.push("Anforderung 0x5D3: " + (MODE_DE[s.mode_5d3.mode] || s.mode_5d3.mode) + " (" + s.mode_5d3.byte0 + ")");
     if (s.active_3e3) parts.push("0x3E3 aktiv: " + yesNo(s.active_3e3.active));
     if (hz.stale) parts.push((bus.awake ? "0x3E5 fehlt seit " : "Bus schläft, letzter Stand vor ") + ago(hz.age_s));
     $("state-sub").textContent = parts.join(" · ") || "–";
@@ -431,7 +435,9 @@ function render(s) {
 
   setValue("v-coolant", hz ? (hz.coolant_error ? "Fehler" : fmt(hz.coolant_c, 1)) : "–", hz && !hz.coolant_error ? "°C" : "");
   $("h-coolant").textContent = hz && hz.fields.water_warmed_up ? "Wasser warm" : "";
-  setValue("v-power", hz ? fmt(hz.power_raw) : "–");
+  setValue("v-power", hz ? "≈ " + fmt(hz.power_w_est / 1000, 1) : "–", "kW");
+  $("h-fuelrate").textContent = hz ? "≈ " + fmt(hz.fuel_rate_l_h_est, 2) + " l/h Kraftstoff" : "–";
+  $("h-power").textContent = "Rohwert " + (hz ? fmt(hz.power_raw) : "–") + " (Byte 4), Schätzung";
   setValue("v-fuel", hz ? fmt(hz.fuel_used_ml) : "–", "ml");
   setValue("v-fuelpump", hz ? onOff(hz.fuel_pump) : "–");
   setValue("v-waterpump", hz ? onOff(hz.water_pump) : "–");
@@ -460,24 +466,37 @@ function render(s) {
     b.disabled = !s.tx.available || pending;
     b.title = s.tx.available ? "" : (s.tx.reason || "");
   }
+  const m = s.mode_5d3;
+  $("panel-byte").textContent = "Bedienteil 0x5D3: " + (m
+    ? m.byte0 + " = " + (MODE_DE[m.mode] || m.mode) + ", Bit 7 " + (m.panel_flag ? "gesetzt" : "nicht gesetzt") + (m.stale ? " (letzter Stand vor " + ago(m.age_s) + ")" : "")
+    : "noch nicht gesehen (Befehl sendet zuerst einen Weck-Frame)");
+  const newest = s.commands[0];
+  const hint = newest && newest.status === "failed" && newest.hint;
+  $("cmd-hint").style.display = hint ? "block" : "none";
+  $("cmd-hint").textContent = hint || "";
   $("tx-reason").textContent = s.tx.available ? (bus.awake ? "Senden möglich." : "Senden möglich. Der erste Frame weckt den Bus.") : s.tx.reason;
 
   // log
   const tb = $("log");
   tb.textContent = "";
   if (!s.commands.length) {
-    const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 4; td.className = "muted"; td.textContent = "Noch keine Befehle.";
+    const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 6; td.className = "muted"; td.textContent = "Noch keine Befehle.";
   }
   for (const c of s.commands) {
     const tr = tb.insertRow();
     tr.insertCell().textContent = new Date(c.time * 1000).toLocaleString("de-DE");
     tr.insertCell().textContent = MODE_DE[c.mode] || c.mode;
     const f = tr.insertCell(); const code = document.createElement("code"); code.textContent = c.frame; f.appendChild(code);
+    tr.insertCell().textContent = c.frames_sent === null || c.frames_sent === undefined ? "–" : fmt(c.frames_sent);
+    tr.insertCell().textContent = c.adopted_after_ms === null || c.adopted_after_ms === undefined ? "–" : fmt(c.adopted_after_ms) + " ms";
     const r = tr.insertCell(); r.className = "msg";
     const tag = document.createElement("span");
-    tag.className = c.status === "ok" ? "ok" : c.status === "error" ? "bad" : "";
-    tag.textContent = c.status === "ok" ? "gesendet" : c.status === "error" ? "Fehler" : "läuft …";
+    tag.className = c.status === "ok" ? "ok" : (c.status === "error" || c.status === "failed") ? "bad" : "";
+    tag.textContent = { ok: "übernommen", failed: "nicht übernommen", error: "Fehler" }[c.status] || "läuft …";
     r.appendChild(tag);
+    if (c.status === "ok" && c.heater_confirmed !== null && c.heater_confirmed !== undefined)
+      r.appendChild(document.createTextNode(" · 0x3E5 " + (c.heater_confirmed ? "bestätigt" : "noch nicht bestätigt")));
+    if (c.hint) r.appendChild(document.createTextNode(" · " + c.hint));
     if (c.message) r.appendChild(document.createTextNode(" · " + c.message));
   }
 
@@ -493,7 +512,7 @@ function render(s) {
 
   const H = s.history;
   drawChart(cCool, H.t, H.coolant_c, s.time);
-  drawChart(cPow, H.t, H.power_raw, s.time);
+  drawChart(cPow, H.t, H.power_kw_est, s.time);
   drawChart(cFuel, H.t, H.fuel_used_ml, s.time);
 }
 
@@ -529,7 +548,7 @@ async function send(mode) {
     const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) { res.className = "bad"; res.textContent = "Abgelehnt: " + (body.error || "HTTP " + r.status); }
-    else { res.textContent = "Befehl angenommen, wird gesendet (dauert ca. 1,5 s)."; }
+    else { res.textContent = "Befehl angenommen, wird gesendet, bis das Bedienteil übernimmt (max. ca. 6 s)."; }
   } catch (e) {
     res.className = "bad"; res.textContent = "Fehler: " + e.message;
   } finally {

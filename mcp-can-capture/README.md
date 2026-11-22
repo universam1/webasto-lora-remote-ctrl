@@ -42,6 +42,7 @@ Captures are written to `mcp-can-capture/captures/` (git-ignored). Override with
 | `decode_3e5(capture, max_rows=50)` | Decode 0x3E5 with the (unverified, T5.1) parking-heater layout; prints only rows where a field changes, interleaved with markers. |
 | `enable_tx(confirm)` | `confirm=true` sends `F1 41 01` and arms TX for this session; `false` disarms it. |
 | `send_frame(id, data_hex, extended=False, count=1, interval_ms=100)` | Transmit on can0. Refused unless the firmware reports `tx_allowed_by_firmware` **and** `enable_tx(confirm=true)` was called this session. Sent frames go into the active capture with `Dir=Tx`. |
+| `set_heater_mode(mode, max_frames=10)` | Switch the heater to `off`, `heat` or `vent` through the roof control unit (0x5D3) and verify it. Same TX gating as `send_frame`. Mirrors bit 7 (0x80) of the panel's current 0x5D3 byte (from a panel frame younger than 2 s, or after one wake frame on a sleeping bus, waiting up to 600 ms). Sends one frame per 500 ms with the device in normal mode for the whole sequence, and stops as soon as a panel 0x5D3 carries the target byte. After `max_frames` it reports `ok: false`, "not adopted by roof unit". Optionally confirms with 0x3E5 (heat: control LED, vent: byte 7 bit 0, off: both clear). Returns JSON with `ok`, `mode`, `target_byte`, `panel_before`, `panel_after`, `frames_sent`, `adopted_after_ms`, `heater_confirmed` and `message`. |
 
 ## Workflow: find the heater on/off signals
 
@@ -61,8 +62,13 @@ Captures are written to `mcp-can-capture/captures/` (git-ignored). Override with
 ## Dashboard
 
 A small local web UI for the heater: state (Aus / Heizen / Lüften / Nachlauf), coolant
-temperature, heating power, fuel used, fuel and water pump, error code, 30-min charts,
-bus and sniffer health, the 0x5D3/0x3E3 echo, and Heizen / Lüften / Aus buttons.
+temperature, heating power (estimated kW and l/h, plus the raw value), fuel used, fuel and water
+pump, error code, 30-min charts, bus and sniffer health, the panel's current 0x5D3 byte including
+bit 7, the 0x3E3 echo, and Heizen / Lüften / Aus buttons.
+
+Heating power is estimated from 0x3E5 byte 4, which is linear in the fuel rate (2.41 ml/h per
+step; raw 241 is about 0.58 l/h). The kW value assumes 5 kW nominal at raw 241 (20.7 W per step)
+and is an estimate.
 Standard library only, no CDN, so it works offline in the car.
 
 ```bash
@@ -79,10 +85,14 @@ the other program's GVRET stream. Call `disconnect()` in the MCP server first.
 
 **TX safety.** Without `--allow-tx` the buttons are disabled and `POST /api/command` returns 403;
 the device stays listen-only. With `--allow-tx`, a command is accepted only if the firmware also
-reports `tx_allowed_by_firmware` (build env `cansniffer_tx`). Each command sends 3x `5D3 <mode> 00`
-500 ms apart; the device is switched to normal mode for that burst only and back to listen-only
-afterwards, also on error. Only one command runs at a time (a second one gets 409), and the last 20
-commands are logged with a timestamp. Each button asks for confirmation. A sleeping bus (no frames
+reports `tx_allowed_by_firmware` (build env `cansniffer_tx`). Each command runs `set_heater_mode`:
+`5D3 <mode | panel bit 7> 00` every 500 ms until the roof unit adopts the value (usually 1–4 frames,
+at most 10). The device is in normal mode only for that sequence and goes back to listen-only
+afterwards, also on error. Only one command runs at a time (a second one gets 409). The last 20
+commands are logged with timestamp, frame (e.g. `5D3#8200`), frames sent, adoption time and
+status: `ok` (adopted), `failed` (not adopted by the roof unit) or `error`. A ventilation command
+that the roof unit does not adopt (known for vent-on while the panel sends `80`) shows the hint
+"Lüften wurde vom Bedienteil nicht übernommen – am Bedienteil starten". Each button asks for confirmation. A sleeping bus (no frames
 about 20 s after the last activity) is shown as "schläft", not as an error; the first command frame
 wakes it. The server binds to 127.0.0.1 by default and rejects requests with a foreign `Host` or
 `Origin` header.

@@ -39,8 +39,16 @@ ID_ACTIVE = 0x3E3  # byte 4: 01 while the heater is active
 
 MODES = {"off": 0x00, "heat": 0x02, "vent": 0x04}
 MODE_NAMES = {v: k for k, v in MODES.items()}
-COMMAND_COUNT = 3
+# 0x3E5 byte 4 (heating power raw) is linear in the fuel rate (captures: raw 90 -> 217 ml/h,
+# 100 -> 243 ml/h, 241 -> 580 ml/h). Watts are an estimate: 5 kW nominal at raw 241.
+FUEL_ML_H_PER_STEP = 2.41
+HEAT_W_PER_STEP = 20.7
+
+PANEL_FLAG = 0x80  # 0x5D3 byte 0 bit 7: panel-state flag, must be mirrored in commands
+COMMAND_MAX_FRAMES = 10
 COMMAND_INTERVAL_MS = 500
+HINT_VENT_NOT_ADOPTED = "Lüften wurde vom Bedienteil nicht übernommen – am Bedienteil starten."
+HINT_NOT_ADOPTED = "Befehl wurde vom Bedienteil nicht übernommen."
 
 ERROR_TEXT_DE = {
     0: "kein Fehler",
@@ -83,6 +91,16 @@ def heater_state(dec: dict[str, Any]) -> str:
     return "off"
 
 
+def power_w_est(raw: int) -> int:
+    """Estimated heat output in W from 0x3E5 byte 4."""
+    return round(raw * HEAT_W_PER_STEP)
+
+
+def fuel_rate_l_h_est(raw: int) -> float:
+    """Estimated fuel rate in l/h from 0x3E5 byte 4."""
+    return round(raw * FUEL_ML_H_PER_STEP / 1000, 2)
+
+
 def decode_status(payload: bytes) -> dict[str, Any]:
     """0x3E5 payload -> decoded fields plus derived state and German error text."""
     dec = analysis.decode_3e5_payload(payload)
@@ -93,6 +111,8 @@ def decode_status(payload: bytes) -> dict[str, Any]:
         "coolant_c": None if coolant == "error" else coolant,
         "coolant_error": coolant == "error",
         "power_raw": dec["heating_power_raw"],
+        "power_w_est": power_w_est(dec["heating_power_raw"]),
+        "fuel_rate_l_h_est": fuel_rate_l_h_est(dec["heating_power_raw"]),
         "fuel_used_ml": dec["fuel_used_ml"],
         "fuel_pump": bool(dec["fuel_pump_on"]),
         "water_pump": bool(dec["water_pump_request"]),
@@ -107,10 +127,10 @@ def decode_status(payload: bytes) -> dict[str, Any]:
 
 
 def decode_mode(payload: bytes) -> str:
-    """0x5D3 byte 0 -> off / heat / vent, or 'unknown(0xNN)'."""
+    """0x5D3 byte 0 (bit 7 ignored) -> off / heat / vent, or 'unknown(0xNN)'."""
     if not payload:
         return "unknown"
-    return MODE_NAMES.get(payload[0], f"unknown(0x{payload[0]:02X})")
+    return MODE_NAMES.get(payload[0] & ~PANEL_FLAG, f"unknown(0x{payload[0]:02X})")
 
 
 def decode_active(payload: bytes) -> bool | None:
@@ -230,8 +250,11 @@ class HeaterMonitor:
         mode = None
         if ID_MODE in last:
             e = last[ID_MODE]
+            b0 = e.payload[0] if e.payload else None
             mode = {
                 "mode": decode_mode(e.payload),
+                "byte0": None if b0 is None else f"0x{b0:02X}",
+                "panel_flag": None if b0 is None else bool(b0 & PANEL_FLAG),
                 "raw": e.payload.hex(" ").upper(),
                 "age_s": age(e.host_time),
                 "stale": now - e.host_time > STALE_S,
@@ -290,6 +313,7 @@ class HeaterMonitor:
                 "t": [h[0] for h in hist],
                 "coolant_c": [h[1] for h in hist],
                 "power_raw": [h[2] for h in hist],
+                "power_kw_est": [round(power_w_est(h[2]) / 1000, 2) for h in hist],
                 "fuel_used_ml": [h[3] for h in hist],
             },
             "commands": commands,
@@ -310,6 +334,7 @@ class HeaterMonitor:
             return HTTPStatus.CONFLICT, {"error": "Ein Befehl wird gerade gesendet."}
         try:
             now = self.clock()
+            expected = self._expected_byte(mode)
             with self._lock:
                 self._cmd_seq += 1
                 entry = {
@@ -317,9 +342,16 @@ class HeaterMonitor:
                     "time": now,
                     "iso": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
                     "mode": mode,
-                    "frame": f"5D3#{MODES[mode]:02X}00 x{COMMAND_COUNT}",
+                    "frame": f"5D3#{expected:02X}00",
                     "status": "pending",
                     "message": "",
+                    "frames_sent": None,
+                    "adopted_after_ms": None,
+                    "target_byte": None,
+                    "panel_before": None,
+                    "panel_after": None,
+                    "heater_confirmed": None,
+                    "hint": None,
                 }
                 self._commands.append(entry)
             logger.info("command %d: %s (%s)", entry["id"], mode, entry["frame"])
@@ -329,20 +361,35 @@ class HeaterMonitor:
             raise
         return HTTPStatus.ACCEPTED, dict(entry)
 
+    def _expected_byte(self, mode: str) -> int:
+        """Byte 0 we expect to send: mode bits plus bit 7 of the last panel 0x5D3 (default 0x80)."""
+        with self._lock:
+            e = self._last.get(ID_MODE)
+        flag = (e.payload[0] & PANEL_FLAG) if e and e.payload else PANEL_FLAG
+        return MODES[mode] | flag
+
     def _run_command(self, entry: dict[str, Any]) -> None:
+        update: dict[str, Any] = {}
         try:
             sn = self.sniffer
             if not sn.tx_session_enabled:
                 msg = sn.enable_tx(True)
                 if not sn.tx_session_enabled:
                     raise RuntimeError(msg)
-            data = bytes([MODES[entry["mode"]], 0])
-            res = sn.send_frame(ID_MODE, data, False, COMMAND_COUNT, COMMAND_INTERVAL_MS)
-            status, message = "ok", res.splitlines()[0]
+            res = sn.set_heater_mode(entry["mode"], COMMAND_MAX_FRAMES, COMMAND_INTERVAL_MS)
+            status = "ok" if res["ok"] else "failed"
+            update = {k: res.get(k) for k in (
+                "frames_sent", "adopted_after_ms", "target_byte", "panel_before", "panel_after", "heater_confirmed",
+            )}
+            if res.get("target_byte"):
+                update["frame"] = f"5D3#{int(res['target_byte'], 16):02X}00"
+            if not res["ok"]:
+                update["hint"] = HINT_VENT_NOT_ADOPTED if entry["mode"] == "vent" else HINT_NOT_ADOPTED
+            message = res["message"]
         except Exception as e:
             status, message = "error", str(e)
         with self._lock:
-            entry.update(status=status, message=message, done=self.clock())
+            entry.update(update, status=status, message=message, done=self.clock())
         (logger.info if status == "ok" else logger.error)("command %d %s: %s", entry["id"], status, message)
         self._cmd_busy.release()
 
@@ -496,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         httpd.server_close()
-        monitor.wait_idle(5.0)  # never cut a burst; send_frame restores listen-only itself
+        monitor.wait_idle(10.0)  # never cut a sequence; set_heater_mode restores listen-only itself
         monitor.stop()
         logger.info(sniffer.disconnect())
     return 0
