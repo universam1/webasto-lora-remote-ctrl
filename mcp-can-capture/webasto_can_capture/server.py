@@ -39,6 +39,22 @@ CAPTURES_DIR = Path(
 )
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$")
 
+ESPRESSIF_USB_VID = 0x303A
+
+
+def _is_native_usb(port: str) -> bool:
+    """True if `port` is an ESP32-S2/S3 native USB CDC port (Espressif VID)."""
+    try:
+        from serial.tools import list_ports
+
+        real = os.path.realpath(port)
+        for p in list_ports.comports():
+            if os.path.realpath(p.device) == real:
+                return p.vid == ESPRESSIF_USB_VID
+    except Exception:  # pragma: no cover - best effort detection
+        pass
+    return False
+
 
 @dataclass
 class ActiveCapture:
@@ -112,16 +128,19 @@ class CanSniffer:
         ser.baudrate = SERIAL_BAUD
         ser.timeout = 0.05
         ser.write_timeout = 1.0
-        ser.dtr = False
+        # Native USB CDC (ESP32-S2/S3, Espressif VID 0x303A) has no auto-reset
+        # circuit and the Arduino core only transmits while DTR is asserted.
+        # USB-UART bridges (CP2102 etc.) need DTR/RTS released so EN/IO0 stay high.
+        native = _is_native_usb(port)
+        ser.dtr = native
         ser.rts = False
         ser.open()
-        # Ensure EN/IO0 are released (ESP32 auto-reset circuit), then let it boot.
         try:
-            ser.dtr = False
+            ser.dtr = native
             ser.rts = False
         except OSError as e:  # e.g. pseudo-terminals without modem lines
             logger.info("could not set DTR/RTS on %s: %s", port, e)
-        time.sleep(1.5)
+        time.sleep(0.3 if native else 1.5)
         ser.reset_input_buffer()
 
         self.ser, self.port = ser, port

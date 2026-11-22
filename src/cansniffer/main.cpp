@@ -1,13 +1,15 @@
 // CAN sniffer for the VW T5.2 Webasto (WWZH) reverse engineering.
 //
-// Hardware: ESP32 DevKit (classic) + SN65HVD230 transceiver.
-//   CAN_TX_PIN -> transceiver D (TXD), CAN_RX_PIN <- transceiver R (RXD),
-//   CAN_RS_PIN -> transceiver Rs (HIGH = standby/driver off, LOW = normal).
+// Hardware: LOLIN ESP32-S2 mini + SN65HVD230 transceiver (pins via build flags).
+//   CAN_TX_PIN -> transceiver D/CTX (TXD), CAN_RX_PIN <- transceiver R/CRX (RXD),
+//   CAN_RS_PIN -> transceiver Rs (HIGH = standby/driver off, LOW = normal),
+//   -1 if Rs is not wired. Without Rs the controller's listen-only mode is the
+//   only guard; TX is held recessive (HIGH) from the first instruction.
 //   Do NOT add a 120 ohm terminator when tapping the vehicle bus.
 //
-// Host protocol: GVRET (SavvyCAN compatible), 921600 baud serial.
-//   The CP2102 on the DevKit cannot do 1 Mbaud exactly (garbled output);
-//   Linux rounds a 1 Mbaud request (SavvyCAN default) down to 921600.
+// Host protocol: GVRET (SavvyCAN compatible). On the S2 this runs over native
+//   USB CDC (baud rate ignored, host must assert DTR). On a classic ESP32 with
+//   a CP2102 use 921600 baud (the CP2102 garbles 1 Mbaud).
 //   Before the host sends E7 E7 the device is in text mode (human readable,
 //   type "help"). After E7 E7 it speaks binary GVRET until reset.
 //
@@ -413,8 +415,15 @@ static void hostInput() {
 // ---------------------------------------------------------------------------
 
 void setup() {
+  // Keep the transceiver's TXD recessive until the TWAI driver owns the pin.
+  pinMode(CAN_TX_PIN, OUTPUT);
+  digitalWrite(CAN_TX_PIN, HIGH);
   Serial.setRxBufferSize(1024);
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0);  // never block the CAN loop when no host is attached
+#else
   Serial.setTxBufferSize(8192);
+#endif
   Serial.begin(SNIFFER_SERIAL_BAUD);
   setTransceiverStandby(true);
   delay(200);

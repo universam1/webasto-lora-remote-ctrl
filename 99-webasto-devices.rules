@@ -17,7 +17,6 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpa
 # Receiver Device (CP2102 on USB port 1.4)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpath}=="1.4", SYMLINK+="ttyWEBASTORECV", MODE="0666", GROUP="uucp"
 
-# CAN sniffer (ESP32 DevKit, CP2102). Set ATTRS{devpath} to the USB port you use
-# (udevadm info -q all -n /dev/ttyUSBx | grep DEVPATH). If the sniffer replaces the
-# simulator board on port 1.1, remove/adjust the simulator rule above.
-# SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{devpath}=="1.3", SYMLINK+="ttyCANSNIFF", MODE="0666", GROUP="uucp"
+# CAN sniffer (LOLIN ESP32-S2 mini, native USB CDC). Matches by USB ID, any port.
+# The ROM bootloader (303a:0002) is not matched; flash via /dev/ttyACM* then.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="80c2", SYMLINK+="ttyCANSNIFF", MODE="0666", GROUP="uucp"
