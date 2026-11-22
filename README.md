@@ -2,6 +2,11 @@
 
 ![Test setup](dev-setup.jpg)
 
+> **CAN instead of W-BUS (in progress):** on the VW T5.2 the factory heater can be switched
+> over CAN (0x5D3) and its status read (0x3E5). Findings, frame layouts and test log:
+> [docs/can-t5-webasto.md](docs/can-t5-webasto.md). Sniffer firmware: `src/cansniffer/`,
+> capture tool for Claude Code: `mcp-can-capture/`.
+
 Two TTGO LoRa32 SX1276 OLED boards:
 
 - **Sender**: sends `start`, `stop`, `run <minutes>` over LoRa; shows receiver/heater status on OLED.
