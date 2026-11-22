@@ -356,12 +356,17 @@ def _span(frames: Sequence[Frame], default: float) -> float:
 ERROR_CODES = {0: "none", 1: "battery_low", 2: "low_fuel", 3: "heater_defective", 4: "crash", 5: "other", 6: "overheat"}
 
 
+def error_code_3e5(d: bytes) -> int:
+    """Error code of a 0x3E5 payload (byte 1 bits 4-6, see ERROR_CODES); 0 means no error."""
+    return d[1] >> 4 & 0x07 if len(d) > 1 else 0
+
+
 def decode_3e5_payload(d: bytes) -> dict[str, object]:
     d = bytes(d) + b"\x00" * max(0, 8 - len(d))
     b0, b1 = d[0], d[1]
     u23 = d[2] | d[3] << 8
     coolant = "error" if d[5] == 0xFF else round(-48 + 0.75 * d[5], 2)
-    err = b1 >> 4 & 0x07
+    err = error_code_3e5(d)
     return {
         "on_via_radio": b0 & 1,
         "off_via_radio": b0 >> 1 & 1,

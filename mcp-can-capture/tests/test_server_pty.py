@@ -27,6 +27,8 @@ class FakeDevice(threading.Thread):
         self.tx_mode_at_send = []
         self.bus_cfg = None
         self.ts = 1000
+        # (can_id, payload) sent every 10 ms once in binary mode; tests may replace it
+        self.frames = [(0x3E5, bytes([0x04, 0x05, 0, 0, 0, 0xA0, 1, 0]))]
         self.lock = threading.Lock()
 
     def send(self, b):
@@ -94,8 +96,9 @@ class FakeDevice(threading.Thread):
             if self.binary and time.time() - last_frame > 0.01:
                 last_frame = time.time()
                 self.ts += 10_000
-                data = bytes([0x04, 0x05, 0, 0, 0, 0xA0, 1, 0])
-                self.send(b"\xF1\x00" + struct.pack("<IIB", self.ts, 0x3E5, 8) + data + b"\x00")
+                for can_id, data in list(self.frames):
+                    hdr = struct.pack("<IIB", self.ts, can_id, len(data))
+                    self.send(b"\xF1\x00" + hdr + data + b"\x00")
 
     def stop(self):
         self.running = False

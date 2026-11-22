@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standheizung T5</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6f6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11,11,11,0.10);
+  --s-coolant: #2a78d6;
+  --s-power: #eb6834;
+  --s-fuel: #1baf7a;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --good-text: #006300;
+  --critical-text: #b02a2a;
+  --heat-wash: #fdeee7;
+  --vent-wash: #e6f0fb;
+  --runon-wash: #fdf5e0;
+  --crit-wash: #fbe7e7;
+  --btn: #ffffff;
+  --btn-hover: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #9a988f;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255,255,255,0.10);
+    --s-coolant: #3987e5;
+    --s-power: #d95926;
+    --s-fuel: #199e70;
+    --good-text: #0ca30c;
+    --critical-text: #e66767;
+    --heat-wash: #3a2219;
+    --vent-wash: #192a3d;
+    --runon-wash: #352b12;
+    --crit-wash: #3d1a1a;
+    --btn: #242423;
+    --btn-hover: #2f2f2d;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #9a988f;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s-coolant: #3987e5; --s-power: #d95926; --s-fuel: #199e70;
+  --good-text: #0ca30c; --critical-text: #e66767;
+  --heat-wash: #3a2219; --vent-wash: #192a3d; --runon-wash: #352b12; --crit-wash: #3d1a1a;
+  --btn: #242423; --btn-hover: #2f2f2d;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+main { max-width: 1040px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; font-weight: 600; }
+h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; color: var(--ink-2); }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px; min-width: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--axis); flex: none; }
+.dot.good { background: var(--good); } .dot.warn { background: var(--warning); } .dot.crit { background: var(--critical); }
+
+/* state tile */
+#state { display: grid; gap: 6px; padding: 20px; }
+#state.heating { background: var(--heat-wash); }
+#state.ventilating { background: var(--vent-wash); }
+#state.run_on { background: var(--runon-wash); }
+#state.err { outline: 2px solid var(--critical); outline-offset: -2px; }
+#state-label { font-size: 44px; font-weight: 650; line-height: 1.1; }
+#state-sub { color: var(--ink-2); }
+#state-error { display: none; color: var(--critical-text); font-weight: 600; }
+#state.err #state-error { display: block; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tile .label { font-size: 13px; color: var(--ink-2); }
+.tile .value { font-size: 28px; font-weight: 600; margin-top: 2px; }
+.tile .value .unit { font-size: 15px; font-weight: 400; color: var(--ink-2); margin-left: 3px; }
+.tile .hint { font-size: 12px; color: var(--muted); }
+.tile.crit { outline: 2px solid var(--critical); outline-offset: -2px; }
+.tile.crit .value { color: var(--critical-text); }
+
+/* commands */
+.buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+button {
+  font: inherit; font-weight: 600; padding: 14px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--ring); background: var(--btn); color: var(--ink); min-height: 48px;
+}
+button:hover:not(:disabled) { background: var(--btn-hover); }
+button:focus-visible { outline: 2px solid var(--s-coolant); outline-offset: 2px; }
+button:disabled { cursor: not-allowed; opacity: 0.45; }
+#tx-reason { margin: 10px 0 0; color: var(--ink-2); font-size: 13px; }
+#cmd-result { margin: 6px 0 0; font-size: 13px; min-height: 1.4em; }
+
+/* charts */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.chart .title { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.chart .title .sw { width: 14px; height: 3px; border-radius: 2px; }
+.chart .now { margin-left: auto; color: var(--ink); font-weight: 600; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.axis-label { fill: var(--muted); font-size: 11px; }
+.series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.cross { stroke: var(--axis); stroke-width: 1; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--ring);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+  white-space: nowrap; display: none; z-index: 2;
+}
+.tip b { font-size: 13px; }
+.empty { fill: var(--muted); font-size: 12px; }
+
+/* health */
+.health { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px 16px; }
+.health div .k { font-size: 12px; color: var(--muted); }
+.health div .v { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+td.msg { color: var(--ink-2); word-break: break-word; }
+.tbl-wrap { overflow-x: auto; }
+.ok { color: var(--good-text); } .bad { color: var(--critical-text); }
+details summary { cursor: pointer; color: var(--ink-2); font-size: 14px; font-weight: 600; }
+code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+dialog { border: 1px solid var(--ring); border-radius: 10px; background: var(--surface); color: var(--ink); max-width: 360px; width: calc(100% - 32px); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+dialog button { padding: 10px 16px; min-height: 0; }
+#dlg-ok { background: var(--ink); color: var(--surface); }
+
+#offline { display: none; background: var(--crit-wash); color: var(--critical-text); border-radius: 8px; padding: 10px 14px; font-weight: 600; }
+
+@media (max-width: 480px) {
+  #state-label { font-size: 36px; }
+  .tile .value { font-size: 24px; }
+  .buttons button { padding: 14px 4px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Standheizung T5.2 (Webasto, CAN)</h1>
+    <span class="pill"><span class="dot" id="conn-dot"></span><span id="conn-text">verbinde …</span></span>
+  </header>
+
+  <div id="offline">Keine Antwort vom Dashboard-Server. Läuft der Prozess noch?</div>
+
+  <section class="card" id="state" aria-live="polite">
+    <div class="small muted">Zustand Heizgerät (0x3E5)</div>
+    <div id="state-label">–</div>
+    <div id="state-error"></div>
+    <div id="state-sub">Noch keine Daten vom Heizgerät.</div>
+  </section>
+
+  <section class="tiles" aria-label="Messwerte">
+    <div class="card tile"><div class="label">Kühlmittel</div><div class="value" id="v-coolant">–</div><div class="hint" id="h-coolant"></div></div>
+    <div class="card tile"><div class="label">Heizleistung</div><div class="value" id="v-power">–</div><div class="hint">Rohwert, Byte 4</div></div>
+    <div class="card tile"><div class="label">Kraftstoff verbraucht</div><div class="value" id="v-fuel">–</div><div class="hint">Zähler des Heizgeräts</div></div>
+    <div class="card tile"><div class="label">Dosierpumpe</div><div class="value" id="v-fuelpump">–</div><div class="hint">Byte 6 Bit 0</div></div>
+    <div class="card tile"><div class="label">Wasserpumpe</div><div class="value" id="v-waterpump">–</div><div class="hint">Byte 1 Bit 3</div></div>
+    <div class="card tile" id="t-error"><div class="label">Fehler</div><div class="value" id="v-error">–</div><div class="hint" id="h-error"></div></div>
+  </section>
+
+  <section class="card" aria-label="Befehle">
+    <h2>Befehle (0x5D3, 3 Frames im Abstand von 500 ms)</h2>
+    <div class="buttons">
+      <button type="button" data-mode="heat">Heizen</button>
+      <button type="button" data-mode="vent">Lüften</button>
+      <button type="button" data-mode="off">Aus</button>
+    </div>
+    <p id="tx-reason"></p>
+    <p id="cmd-result"></p>
+  </section>
+
+  <section class="charts">
+    <div class="card">
+      <h2>Kühlmitteltemperatur (letzte 30 min)</h2>
+      <div class="chart" id="c-coolant"></div>
+    </div>
+    <div class="card">
+      <h2>Heizleistung und Kraftstoff (letzte 30 min)</h2>
+      <div class="chart" id="c-power"></div>
+      <div class="chart" id="c-fuel"></div>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Bus und Gerät">
+    <h2>Bus und Sniffer</h2>
+    <div class="health">
+      <div><div class="k">CAN-Bus</div><div class="v"><span class="dot" id="d-bus"></span><span id="v-bus">–</span></div></div>
+      <div><div class="k">Frames/s</div><div class="v" id="v-rate">–</div></div>
+      <div><div class="k">Letzter Frame vor</div><div class="v" id="v-since">–</div></div>
+      <div><div class="k">IDs gesehen</div><div class="v" id="v-ids">–</div></div>
+      <div><div class="k">Verlorene Frames</div><div class="v"><span class="dot" id="d-missed"></span><span id="v-missed">–</span></div></div>
+      <div><div class="k">Busfehler</div><div class="v"><span class="dot" id="d-buserr"></span><span id="v-buserr">–</span></div></div>
+      <div><div class="k">Controller</div><div class="v" id="v-ctrl">–</div></div>
+      <div><div class="k">TX in Firmware</div><div class="v" id="v-txfw">–</div></div>
+      <div><div class="k">TX im Dashboard</div><div class="v" id="v-txflag">–</div></div>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Befehlsprotokoll">
+    <h2>Befehlsprotokoll (letzte 20)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Zeit</th><th>Befehl</th><th>Frame</th><th>Ergebnis</th></tr></thead>
+        <tbody id="log"><tr><td colspan="4" class="muted">Noch keine Befehle.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>Rohdaten und alle Felder</summary>
+      <div class="tbl-wrap" style="margin-top:10px">
+        <table><tbody id="raw"></tbody></table>
+      </div>
+    </details>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog">
+    <p id="dlg-text" style="margin-top:0"></p>
+    <p class="small muted" style="margin:0">Sendet 3× 0x5D3 auf den Komfort-CAN.</p>
+    <div class="row">
+      <button value="cancel" type="submit">Abbrechen</button>
+      <button value="ok" type="submit" id="dlg-ok">Senden</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const STATE_DE = { off: "Aus", heating: "Heizen", ventilating: "Lüften", run_on: "Nachlauf" };
+const MODE_DE = { off: "Aus", heat: "Heizen", vent: "Lüften" };
+const FIELD_DE = {
+  on_via_radio: "Ein per Funk", off_via_radio: "Aus per Funk", heating_on: "Heizen ein",
+  ventilation_on: "Lüften ein", ac_off: "Klima aus", heater_mode_activating: "Heizmodus aktivierend",
+  heater_programming: "Programmierung", wake_komfort_can: "Komfort-CAN wecken",
+  vehicle_blower: "Fahrzeuggebläse", control_led: "Kontroll-LED / Heizung aktiv",
+  combustion_on: "Verbrennung", water_pump_request: "Wasserpumpe angefordert",
+  error_code: "Fehlercode", error_stored: "Fehler gespeichert", fuel_used_ml: "Kraftstoff (ml)",
+  parking_heater: "Standheizung (ohne Kl.15)", kl30_lost: "Kl.30 verloren",
+  heating_power_raw: "Heizleistung (roh)", coolant_c: "Kühlmittel (°C)",
+  fuel_pump_on: "Dosierpumpe", water_warmed_up: "Wasser warm", ventilation_active: "Lüftung aktiv",
+};
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 0) => (v === null || v === undefined) ? "–" : Number(v).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
+const onOff = (b) => b === null || b === undefined ? "–" : (b ? "an" : "aus");
+const yesNo = (b) => b === null || b === undefined ? "–" : (b ? "ja" : "nein");
+function ago(s) {
+  if (s === null || s === undefined) return "–";
+  if (s < 60) return fmt(s, s < 10 ? 1 : 0) + " s";
+  if (s < 3600) return Math.floor(s / 60) + " min " + Math.floor(s % 60) + " s";
+  return fmt(s / 3600, 1) + " h";
+}
+function setValue(id, text, unit) {
+  const el = $(id);
+  el.textContent = text;
+  if (unit && text !== "–") {
+    const u = document.createElement("span");
+    u.className = "unit"; u.textContent = unit; el.appendChild(u);
+  }
+}
+function setDot(id, level) { $(id).className = "dot" + (level ? " " + level : ""); }
+
+// ------------------------------------------------------------------ charts
+const W = 520, H = 150, ML = 40, MR = 10, MT = 8, MB = 22;
+function niceTicks(lo, hi, n) {
+  const span = hi - lo || 1;
+  const step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= n - 1) || 10 * mag;
+  const out = [];
+  // ticks enclose the data: first tick <= lo, last tick >= hi
+  const end = Math.ceil(hi / step - 1e-9) * step;
+  for (let v = Math.floor(lo / step + 1e-9) * step; v <= end + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const charts = {};
+function makeChart(id, title, color, unit, digits, height) {
+  const root = $(id);
+  const head = document.createElement("div"); head.className = "title";
+  const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = color;
+  const t = document.createElement("span"); t.textContent = title;
+  const now = document.createElement("span"); now.className = "now";
+  head.append(sw, t, now); root.appendChild(head);
+  const h = height || H;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${h}`, role: "img", "aria-label": title }, root);
+  const tip = document.createElement("div"); tip.className = "tip"; root.appendChild(tip);
+  const c = { root, svg, tip, now, color, unit, digits, h, title, data: null };
+  svg.addEventListener("pointermove", (ev) => hover(c, ev));
+  svg.addEventListener("pointerleave", () => { c.tip.style.display = "none"; if (c.cross) c.cross.style.display = "none"; });
+  charts[id] = c;
+  return c;
+}
+function hhmm(t) { const d = new Date(t * 1000); return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); }
+function hhmmss(t) { return new Date(t * 1000).toLocaleTimeString("de-DE"); }
+
+function drawChart(c, ts, ys, nowT) {
+  const svg = c.svg, h = c.h;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const x1 = nowT, x0 = nowT - 1800;
+  const pts = [];
+  for (let i = 0; i < ts.length; i++) if (ys[i] !== null && ts[i] >= x0) pts.push([ts[i], ys[i]]);
+  c.data = pts; c.x0 = x0; c.x1 = x1;
+  const pw = W - ML - MR, ph = h - MT - MB;
+  const X = (t) => ML + (t - x0) / (x1 - x0) * pw;
+  c.X = X;
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }
+  if (!pts.length) { lo = 0; hi = 1; }
+  if (c.zero) lo = Math.min(lo, 0);
+  if (hi - lo < c.minSpan) { const m = (hi + lo) / 2; lo = c.zero ? lo : m - c.minSpan / 2; hi = lo + c.minSpan; }
+  const ticks = niceTicks(lo, hi, 4);
+  lo = ticks[0]; hi = ticks[ticks.length - 1];
+  const Y = (v) => MT + (1 - (v - lo) / (hi - lo || 1)) * ph;
+  c.Y = Y;
+  for (const tv of ticks) {
+    svgEl("line", { x1: ML, x2: W - MR, y1: Y(tv), y2: Y(tv), class: "grid-line" }, svg);
+    const lab = svgEl("text", { x: ML - 6, y: Y(tv) + 4, "text-anchor": "end", class: "axis-label" }, svg);
+    lab.textContent = fmt(tv, Number.isInteger(tv) ? 0 : 1);
+  }
+  for (let m = 0; m <= 30; m += 10) {
+    const t = x0 + m * 60;
+    const lab = svgEl("text", { x: X(t), y: h - 6, "text-anchor": m === 0 ? "start" : m === 30 ? "end" : "middle", class: "axis-label" }, svg);
+    lab.textContent = m === 30 ? "jetzt" : hhmm(t);
+  }
+  if (!pts.length) {
+    const e = svgEl("text", { x: ML + pw / 2, y: MT + ph / 2, "text-anchor": "middle", class: "empty" }, svg);
+    e.textContent = "noch keine Werte";
+  } else {
+    // break the line where samples are missing (bus asleep, no 0x3E5)
+    let d = "";
+    for (let i = 0; i < pts.length; i++) {
+      const gap = i === 0 || pts[i][0] - pts[i - 1][0] > 5;
+      d += (gap ? "M" : "L") + X(pts[i][0]).toFixed(1) + " " + Y(pts[i][1]).toFixed(1);
+    }
+    svgEl("path", { d, class: "series", stroke: c.color }, svg);
+    const last = pts[pts.length - 1];
+    svgEl("circle", { cx: X(last[0]), cy: Y(last[1]), r: 4, fill: c.color, stroke: "var(--surface)", "stroke-width": 2 }, svg);
+  }
+  c.cross = svgEl("line", { y1: MT, y2: MT + ph, class: "cross", style: "display:none" }, svg);
+  c.marker = svgEl("circle", { r: 4, fill: c.color, stroke: "var(--surface)", "stroke-width": 2, style: "display:none" }, svg);
+  c.now.textContent = pts.length ? fmt(pts[pts.length - 1][1], c.digits) + " " + c.unit : "";
+  if (c.lastEv) hover(c, c.lastEv);
+}
+function hover(c, ev) {
+  c.lastEv = ev;
+  if (!c.data || !c.data.length) return;
+  const r = c.svg.getBoundingClientRect();
+  const sx = (ev.clientX - r.left) / r.width * W;
+  const t = c.x0 + (sx - ML) / (W - ML - MR) * (c.x1 - c.x0);
+  let best = c.data[0];
+  for (const p of c.data) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+  const x = c.X(best[0]), y = c.Y(best[1]);
+  c.cross.setAttribute("x1", x); c.cross.setAttribute("x2", x); c.cross.style.display = "";
+  c.marker.setAttribute("cx", x); c.marker.setAttribute("cy", y); c.marker.style.display = "";
+  c.tip.textContent = "";
+  const b = document.createElement("b"); b.textContent = fmt(best[1], c.digits) + " " + c.unit;
+  const s = document.createElement("div"); s.className = "muted"; s.textContent = c.title + " · " + hhmmss(best[0]);
+  c.tip.append(b, s);
+  c.tip.style.display = "block";
+  const px = x / W * r.width, tw = c.tip.offsetWidth;
+  c.tip.style.left = Math.max(0, Math.min(r.width - tw, px + 10 > r.width - tw ? px - tw - 10 : px + 10)) + "px";
+  c.tip.style.top = (c.svg.offsetTop + 4) + "px";
+}
+const cCool = makeChart("c-coolant", "Kühlmittel", "var(--s-coolant)", "°C", 1, 170);
+cCool.minSpan = 10;
+const cPow = makeChart("c-power", "Heizleistung (roh)", "var(--s-power)", "", 0, 110);
+cPow.minSpan = 10; cPow.zero = true;
+const cFuel = makeChart("c-fuel", "Kraftstoff", "var(--s-fuel)", "ml", 0, 110);
+cFuel.minSpan = 5;
+
+// ------------------------------------------------------------------ state rendering
+let last = null;
+function render(s) {
+  last = s;
+  $("offline").style.display = "none";
+  const conn = s.connection;
+  setDot("conn-dot", conn.connected ? "good" : "crit");
+  $("conn-text").textContent = conn.connected ? "verbunden mit " + conn.port : "getrennt" + (conn.reader_error ? ": " + conn.reader_error : "");
+
+  const hz = s.heater, bus = s.bus;
+  const st = $("state");
+  if (!hz) {
+    st.className = "card";
+    $("state-label").textContent = "–";
+    $("state-sub").textContent = bus.awake ? "Bus aktiv, aber noch kein 0x3E5 vom Heizgerät." : "Noch keine Daten. Der Bus schläft vermutlich (Zündung aus).";
+  } else {
+    const err = hz.error.code !== 0;
+    st.className = "card " + hz.state + (err ? " err" : "");
+    $("state-label").textContent = STATE_DE[hz.state] || hz.state;
+    $("state-error").textContent = err ? "Fehler " + hz.error.code + ": " + hz.error.text : "";
+    const parts = [];
+    if (s.mode_5d3) parts.push("Anforderung 0x5D3: " + (MODE_DE[s.mode_5d3.mode] || s.mode_5d3.mode));
+    if (s.active_3e3) parts.push("0x3E3 aktiv: " + yesNo(s.active_3e3.active));
+    if (hz.stale) parts.push((bus.awake ? "0x3E5 fehlt seit " : "Bus schläft, letzter Stand vor ") + ago(hz.age_s));
+    $("state-sub").textContent = parts.join(" · ") || "–";
+  }
+
+  setValue("v-coolant", hz ? (hz.coolant_error ? "Fehler" : fmt(hz.coolant_c, 1)) : "–", hz && !hz.coolant_error ? "°C" : "");
+  $("h-coolant").textContent = hz && hz.fields.water_warmed_up ? "Wasser warm" : "";
+  setValue("v-power", hz ? fmt(hz.power_raw) : "–");
+  setValue("v-fuel", hz ? fmt(hz.fuel_used_ml) : "–", "ml");
+  setValue("v-fuelpump", hz ? onOff(hz.fuel_pump) : "–");
+  setValue("v-waterpump", hz ? onOff(hz.water_pump) : "–");
+  const errCode = hz ? hz.error.code : 0;
+  $("t-error").className = "card tile" + (errCode ? " crit" : "");
+  setValue("v-error", hz ? (errCode ? "Code " + errCode : "keiner") : "–");
+  $("h-error").textContent = hz ? (errCode ? hz.error.text : "") + (hz.error.stored ? (errCode ? " · " : "") + "Fehler gespeichert" : "") : "";
+
+  // health
+  setDot("d-bus", bus.awake ? "good" : "");
+  $("v-bus").textContent = bus.awake ? "wach" : (bus.since_last_frame_s === null ? "keine Frames" : "schläft");
+  $("v-rate").textContent = fmt(bus.frames_per_s, 1);
+  $("v-since").textContent = ago(bus.since_last_frame_s);
+  $("v-ids").textContent = fmt(bus.distinct_ids);
+  const dv = s.device;
+  $("v-missed").textContent = dv ? fmt(dv.rx_missed) : "–";
+  setDot("d-missed", dv ? (dv.rx_missed ? "warn" : "good") : "");
+  $("v-buserr").textContent = dv ? fmt(dv.bus_errors) : "–";
+  setDot("d-buserr", dv ? (dv.bus_errors ? "warn" : "good") : "");
+  $("v-ctrl").textContent = dv ? dv.state + (dv.tx_enabled_now ? " (sendet)" : " (nur hören)") : "–";
+  $("v-txfw").textContent = dv ? yesNo(dv.tx_allowed_by_firmware) : "–";
+  $("v-txflag").textContent = s.tx.allow_tx_flag ? "erlaubt (--allow-tx)" : "gesperrt";
+
+  // commands
+  for (const b of document.querySelectorAll("button[data-mode]")) {
+    b.disabled = !s.tx.available || pending;
+    b.title = s.tx.available ? "" : (s.tx.reason || "");
+  }
+  $("tx-reason").textContent = s.tx.available ? (bus.awake ? "Senden möglich." : "Senden möglich. Der erste Frame weckt den Bus.") : s.tx.reason;
+
+  // log
+  const tb = $("log");
+  tb.textContent = "";
+  if (!s.commands.length) {
+    const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 4; td.className = "muted"; td.textContent = "Noch keine Befehle.";
+  }
+  for (const c of s.commands) {
+    const tr = tb.insertRow();
+    tr.insertCell().textContent = new Date(c.time * 1000).toLocaleString("de-DE");
+    tr.insertCell().textContent = MODE_DE[c.mode] || c.mode;
+    const f = tr.insertCell(); const code = document.createElement("code"); code.textContent = c.frame; f.appendChild(code);
+    const r = tr.insertCell(); r.className = "msg";
+    const tag = document.createElement("span");
+    tag.className = c.status === "ok" ? "ok" : c.status === "error" ? "bad" : "";
+    tag.textContent = c.status === "ok" ? "gesendet" : c.status === "error" ? "Fehler" : "läuft …";
+    r.appendChild(tag);
+    if (c.message) r.appendChild(document.createTextNode(" · " + c.message));
+  }
+
+  // raw
+  const raw = $("raw"); raw.textContent = "";
+  const row = (k, v) => { const tr = raw.insertRow(); tr.insertCell().textContent = k; const td = tr.insertCell(); const cd = document.createElement("code"); cd.textContent = v; td.appendChild(cd); };
+  row("0x3E5", hz ? hz.raw + "  (vor " + ago(hz.age_s) + ")" : "–");
+  row("0x5D3", s.mode_5d3 ? s.mode_5d3.raw + "  (vor " + ago(s.mode_5d3.age_s) + ")" : "–");
+  row("0x3E3", s.active_3e3 ? s.active_3e3.raw + "  (vor " + ago(s.active_3e3.age_s) + ")" : "–");
+  if (hz) for (const k in hz.fields) row(FIELD_DE[k] || k, String(hz.fields[k]));
+  row("Frames seit Verbindung", fmt(bus.total_frames));
+  if (dv) row("Gerät rx_frames", fmt(dv.rx_frames));
+
+  const H = s.history;
+  drawChart(cCool, H.t, H.coolant_c, s.time);
+  drawChart(cPow, H.t, H.power_raw, s.time);
+  drawChart(cFuel, H.t, H.fuel_used_ml, s.time);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+  } catch (e) {
+    $("offline").style.display = "block";
+    setDot("conn-dot", "crit");
+    $("conn-text").textContent = "Dashboard-Server nicht erreichbar";
+  }
+}
+
+// ------------------------------------------------------------------ commands
+let pending = false;
+const dlg = $("dlg");
+for (const b of document.querySelectorAll("button[data-mode]")) {
+  b.addEventListener("click", () => {
+    const mode = b.dataset.mode;
+    $("dlg-text").textContent = "Standheizung wirklich auf „" + MODE_DE[mode] + "“ schalten?";
+    dlg.returnValue = "";
+    dlg.onclose = () => { if (dlg.returnValue === "ok") send(mode); };
+    dlg.showModal();
+  });
+}
+async function send(mode) {
+  pending = true;
+  const res = $("cmd-result");
+  res.className = ""; res.textContent = "Sende „" + MODE_DE[mode] + "“ …";
+  try {
+    const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) { res.className = "bad"; res.textContent = "Abgelehnt: " + (body.error || "HTTP " + r.status); }
+    else { res.textContent = "Befehl angenommen, wird gesendet (dauert ca. 1,5 s)."; }
+  } catch (e) {
+    res.className = "bad"; res.textContent = "Fehler: " + e.message;
+  } finally {
+    pending = false;
+    poll();
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

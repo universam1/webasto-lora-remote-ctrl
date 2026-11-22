@@ -7,11 +7,15 @@ Runs over stdio. Exposes connection, live view, capture and analysis tools.
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
+import itertools
 import json
 import logging
 import os
 import re
 import struct
+import termios
 import threading
 import time
 from collections import deque
@@ -54,6 +58,42 @@ def _is_native_usb(port: str) -> bool:
     except Exception:  # pragma: no cover - best effort detection
         pass
     return False
+
+
+class PortBusyError(RuntimeError):
+    """The serial port is already held by another program (MCP server, dashboard, SavvyCAN)."""
+
+
+def _open_exclusive(ser: serial.Serial, port: str) -> None:
+    """Open `ser` so that a second process fails cleanly instead of sharing the GVRET stream.
+
+    pyserial's `exclusive=True` takes an advisory flock(); TIOCEXCL additionally makes the
+    kernel refuse further open() calls on the tty with EBUSY (for programs that do not use
+    flock, e.g. SavvyCAN). Some ttys (certain pseudo-terminals) reject TIOCEXCL; then only
+    the flock protects the port.
+    """
+    ser.exclusive = True
+    try:
+        ser.open()
+    except serial.SerialException as e:
+        busy = e.errno in (errno.EBUSY, errno.EAGAIN, errno.EWOULDBLOCK) or "exclusively lock" in str(e)
+        if busy:
+            raise PortBusyError(
+                f"port {port} is busy (used by another program); disconnect the MCP server, "
+                "dashboard or SavvyCAN first"
+            ) from e
+        raise
+    try:
+        fcntl.ioctl(ser.fileno(), termios.TIOCEXCL)
+    except OSError as e:
+        logger.info("TIOCEXCL not supported on %s (%s); relying on flock only", port, e)
+
+
+def _release_exclusive(ser: serial.Serial) -> None:
+    try:
+        fcntl.ioctl(ser.fileno(), termios.TIOCNXCL)
+    except Exception:  # not open, or TIOCEXCL was never set
+        pass
 
 
 @dataclass
@@ -134,7 +174,7 @@ class CanSniffer:
         native = _is_native_usb(port)
         ser.dtr = native
         ser.rts = False
-        ser.open()
+        _open_exclusive(ser, port)
         try:
             ser.dtr = native
             ser.rts = False
@@ -192,6 +232,8 @@ class CanSniffer:
         self._threads = []
         if self.ser is not None:
             try:
+                # TIOCEXCL sticks to the tty while any fd is open; clear it explicitly
+                _release_exclusive(self.ser)
                 self.ser.close()
             except Exception as e:  # pragma: no cover
                 logger.warning("close failed: %s", e)
@@ -406,6 +448,19 @@ class CanSniffer:
         lines.append(f"tx: session_enabled={self.tx_session_enabled}, frames_sent={self.tx_sent}")
         lines.append(f"capture: {cap.name} ({cap.rx} rx, {cap.tx} tx, {cap.marks} markers)" if cap else "capture: none")
         return "\n".join(lines)
+
+    def rx_since(self, seen_total: int) -> tuple[int, list[_RxEntry]]:
+        """Frames received after the first `seen_total` frames since connect.
+
+        Returns (total_rx, new entries, oldest first). If more frames arrived than the ring
+        holds, only the ring's content is returned.
+        """
+        with self._lock:
+            total = self.total_rx
+            n = min(max(total - seen_total, 0), len(self.ring))
+            new = list(itertools.islice(reversed(self.ring), n))
+        new.reverse()
+        return total, new
 
     def tail(self, n: int, id_filter: str | None) -> str:
         ids = _parse_id_filter(id_filter)

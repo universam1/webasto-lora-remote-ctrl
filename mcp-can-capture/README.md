@@ -58,6 +58,35 @@ Captures are written to `mcp-can-capture/captures/` (git-ignored). Override with
    - `summarize("heater_onoff_1", start_s=10, end_s=40)` for a closer look
 6. Repeat the recording at least once; signals that show up in both runs are the candidates.
 
+## Dashboard
+
+A small local web UI for the heater: state (Aus / Heizen / Lüften / Nachlauf), coolant
+temperature, heating power, fuel used, fuel and water pump, error code, 30-min charts,
+bus and sniffer health, the 0x5D3/0x3E3 echo, and Heizen / Lüften / Aus buttons.
+Standard library only, no CDN, so it works offline in the car.
+
+```bash
+venv/bin/python -m webasto_can_capture.dashboard --port /dev/ttyCANSNIFF [--http 127.0.0.1:8765] [--allow-tx]
+```
+
+Then open http://127.0.0.1:8765/. API: `GET /api/state` (JSON, polled once per second by the
+page) and `POST /api/command` with `{"mode": "heat"|"vent"|"off"}`.
+
+**One program per port.** The dashboard uses the same `CanSniffer` as the MCP server and opens the
+port exclusively (flock plus `TIOCEXCL`). It cannot run at the same time as the MCP server
+(`connect`) or SavvyCAN. If the port is taken it exits with `port ... is busy` instead of corrupting
+the other program's GVRET stream. Call `disconnect()` in the MCP server first.
+
+**TX safety.** Without `--allow-tx` the buttons are disabled and `POST /api/command` returns 403;
+the device stays listen-only. With `--allow-tx`, a command is accepted only if the firmware also
+reports `tx_allowed_by_firmware` (build env `cansniffer_tx`). Each command sends 3x `5D3 <mode> 00`
+500 ms apart; the device is switched to normal mode for that burst only and back to listen-only
+afterwards, also on error. Only one command runs at a time (a second one gets 409), and the last 20
+commands are logged with a timestamp. Each button asks for confirmation. A sleeping bus (no frames
+about 20 s after the last activity) is shown as "schläft", not as an error; the first command frame
+wakes it. The server binds to 127.0.0.1 by default and rejects requests with a foreign `Host` or
+`Origin` header.
+
 ## SavvyCAN
 
 SavvyCAN cannot open the serial port while this server is connected (only one program can
