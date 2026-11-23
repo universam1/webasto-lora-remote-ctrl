@@ -301,6 +301,74 @@ The run time is not in 0x5D3 (byte 1 always `00`). The roof unit applies its own
 - The transceiver TX pin must be recessive (HIGH) from power-up. A pull-up of about 10 kΩ
   from CTX to 3.3 V is recommended, so that a reset cannot wake or disturb the bus.
 
+## Radio remote (Telestart / VW Funkfernbedienung): what we are emulating
+
+Research from 2026-11-23. Forum and Webasto sources are listed at the end of this section.
+
+- **The receiver is W-Bus only.** It has 3 wires: Kl.30, W-Bus to heater pin 1, and GND.
+  - There is no CAN radio receiver on the T5, and so no receiver CAN ID to imitate.
+  - On a factory WWZH the pin-1 wire (green/white) already exists and ends open at the 8-pin
+    underbody connector, chamber 5.
+- **The heater reports radio commands on CAN** in 0x3E5 byte 0. The VW signal names come from
+  the mStHeizung_1 signal list (Golf V):
+
+  | Bit | Signal | Meaning |
+  |---|---|---|
+  | 0 | SH1_Funk_ein | radio command on (heat or vent) received |
+  | 1 | SH1_Funk_aus | radio command off received |
+  | 2 | SH1_FunkSH_Ein | radio command "heat on" |
+  | 3 | SH1_FunkStLftg | radio command "ventilate on" |
+  | 4 | SH1_Clima_aus | A/C off |
+  | 5 | SH1_SH_Modus | parking-heater mode |
+  | 6 | SH1_Prog_Modus | programming |
+  | 7 | SH1_Wake_Up_Komfort | wake Komfort-CAN |
+
+  The radio bits are an impulse: 5 frames, then 0 again. Their exact timing, and whether b0 is
+  combined with b2/b3, is not documented.
+- **With the VW remote, the hand transmitter only gives an "on" impulse.**
+  - The roof unit decides mode and run time, from its menu **FERNBED.** (default 30 min,
+    up to 120 min).
+  - The roof unit shows the remote start with its remaining time.
+  - This fits our CAN start running 30 min.
+- **Coding:**
+  - Roof unit, address 6E: `000202` → `000203` makes the FERNBED. menu appear. Note that
+    `0003xx` only enables the compass display.
+  - Heater, address 18: 4th digit "Funkfernbedienung verbaut" (0/1). If it is coded to 1
+    without a receiver, the heater logs DTC 02245 "Verbindung Funkfernbedienung – kein Signal".
+  - Teaching remotes: address 18, adaptation channel 05.
+  - Not yet checked whether our 7E7 906 453 C sits at 6E with this coding.
+- **W-Bus addresses** (libwbus): Telestart = 2 (header `0x24`), timer 1533 = 3, diagnostics =
+  F (`0xF4`, used by our receiver), heater = 4.
+- **Ventilation via a remote works on a T5.2 factory WWZH** (Webasto T91 on pin 1). The forum
+  statements "Lüften geht beim T5 nicht" refer to the retrofit Zuheizer kit, not to the
+  factory WWZH.
+
+**CAN-only emulation plan (speculative, to be tested):**
+1. Code 6E to `…03`. In FERNBED., set mode = Lüften and a run time.
+2. Use `radio_impulse('on')`. It sends 5× spoofed 0x3E5 with byte 0 = `81` (b0 + wake), bytes
+   1–7 copied from the real frame, and no 0x5D3.
+3. Check whether the roof unit then sends `84` by itself and shows the FERNBED. time.
+4. Variants:
+   - explicit bits `09` (b0 + b3, used by `set_heater_mode(radio_emulation=True)`) or `05` (heat)
+   - `radio_impulse('off')` with b1
+   - 200 ms spacing vs a fast block
+5. Keep heater coding 18 unchanged at first, to avoid DTC 02245.
+
+**Pure W-Bus alternative.** It is documented to work for heat, vent and status, with the run
+time taken from FERNBED. It needs the sender address 2 instead of F, codings 18 and 6E, and
+possibly answering the heater's polling of the receiver (unknown). Sniffing a real VW receiver
+(7N0/1K0/1N0 963 513) would settle this.
+
+Sources:
+- https://tx-board.de/threads/funkmodul-webasto-standheizung.133759/page-2
+- https://tx-board.de/threads/wwzh-fernbedienung-anlernen-klappt-nicht.143424/page-2
+- https://tx-board.de/threads/t91-telestart-nachgeruestet-heizt-aber-nur-30min.124874
+- https://tx-board.de/threads/codierung-dachuhr-wwzh-mit-fernbedienung-ploetzlich-kompassanzeige.99655
+- https://www.canhack.de/viewtopic.php?t=199
+- https://www.caliboard.de/topic/4079-wwzh-webasto-kit-kann-can-nicht-wecken
+- https://raw.githubusercontent.com/futuranet/libwbus/master/wbus/wbus_const.h
+- Webasto 9012106D (T5 TT-C kit) and 9030705C (Telestart T91/T100)
+
 ## Open
 
 1. **0x5D3 bit 7:** what it means, what set it, and how to get back to `00`. Candidates:

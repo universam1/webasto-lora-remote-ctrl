@@ -6,6 +6,7 @@ the 0x3E5 decoder from analysis.py. Serves one static page plus a small JSON API
 127.0.0.1 with the stdlib http.server.
 
     venv/bin/python -m webasto_can_capture.dashboard --port /dev/ttyCANSNIFF [--http 127.0.0.1:8765] [--allow-tx]
+        [--allow-status-spoof]
 """
 
 from __future__ import annotations
@@ -49,6 +50,9 @@ COMMAND_MAX_FRAMES = 10
 COMMAND_INTERVAL_MS = 500
 HINT_VENT_NOT_ADOPTED = "Lüften wurde vom Bedienteil nicht übernommen – am Bedienteil starten."
 HINT_NOT_ADOPTED = "Befehl wurde vom Bedienteil nicht übernommen."
+HINT_SPOOF_LOCKED = "Funkstart-Emulation gesperrt: Dashboard wurde ohne --allow-status-spoof gestartet."
+HINT_IMPULSE_IGNORED = "Bedienteil hat auf den Funk-Impuls nicht wie erwartet reagiert."
+IMPULSE_FRAMES = 5
 
 ERROR_TEXT_DE = {
     0: "kein Fehler",
@@ -151,9 +155,17 @@ class HeaterMonitor:
     """Follows the sniffer's ring buffer, keeps the latest heater frames, a 1 Hz history and
     the command log, and runs heater commands in a worker thread."""
 
-    def __init__(self, sniffer: CanSniffer, allow_tx: bool, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        sniffer: CanSniffer,
+        allow_tx: bool,
+        clock: Callable[[], float] = time.time,
+        allow_status_spoof: bool = False,
+    ):
         self.sniffer = sniffer
         self.allow_tx = allow_tx
+        # radio-start emulation spoofs the heater's own 0x3E5; only with --allow-status-spoof
+        self.allow_status_spoof = allow_tx and allow_status_spoof
         self.clock = clock
         self._lock = threading.Lock()
         self._seen = 0
@@ -303,6 +315,7 @@ class HeaterMonitor:
             "device": device,
             "tx": {
                 "allow_tx_flag": self.allow_tx,
+                "allow_status_spoof": self.allow_status_spoof,
                 "allowed_by_firmware": bool(st and st.tx_allowed_by_firmware),
                 "available": available,
                 "reason": reason,
@@ -321,10 +334,39 @@ class HeaterMonitor:
 
     # -------------------------------------------------------------- commands
 
-    def command(self, mode: str) -> tuple[int, dict[str, Any]]:
-        """Start a heater command. Returns (HTTP status, log entry or error)."""
+    def command(self, mode: str, radio_emulation: bool = False) -> tuple[int, dict[str, Any]]:
+        """Start a heater command. Returns (HTTP status, log entry or error).
+
+        `radio_emulation` additionally spoofs 0x3E5 (radio-start emulation); refused unless the
+        dashboard was started with --allow-status-spoof."""
         if mode not in MODES:
             return HTTPStatus.BAD_REQUEST, {"error": f"unbekannter Modus {mode!r}; erlaubt: heat, vent, off"}
+        if radio_emulation and not self.allow_status_spoof:
+            logger.warning("command %s with radio emulation refused: no --allow-status-spoof", mode)
+            return HTTPStatus.FORBIDDEN, {"error": HINT_SPOOF_LOCKED}
+        fields = {
+            "frame": f"5D3#{self._expected_byte(mode):02X}00",
+            "frames_sent": None,
+            "adopted_after_ms": None,
+            "target_byte": None,
+            "heater_confirmed": None,
+            "radio_emulation": bool(radio_emulation),
+            "heater_confirmed_before_spoof": None,
+        }
+        return self._launch(mode, fields, self._run_command)
+
+    def impulse(self, kind: str) -> tuple[int, dict[str, Any]]:
+        """Start a radio-remote ON/OFF impulse (spoofed 0x3E5 only, no 0x5D3). Needs --allow-status-spoof."""
+        if kind not in ("on", "off"):
+            return HTTPStatus.BAD_REQUEST, {"error": f"unbekannter Impuls {kind!r}; erlaubt: on, off"}
+        if not self.allow_status_spoof:
+            logger.warning("impulse %s refused: no --allow-status-spoof", kind)
+            return HTTPStatus.FORBIDDEN, {"error": HINT_SPOOF_LOCKED}
+        b0 = (0x01 if kind == "on" else 0x02) | 0x80
+        fields = {"frame": f"3E5#{b0:02X}… ×{IMPULSE_FRAMES}", "radio_emulation": True, "heater_before": None, "heater_after": None}
+        return self._launch(f"impulse_{kind}", fields, self._run_impulse)
+
+    def _launch(self, mode: str, fields: dict[str, Any], runner: Callable[[dict[str, Any]], None]) -> tuple[int, dict[str, Any]]:
         available, reason = self.tx_availability()
         if not available:
             status = HTTPStatus.CONFLICT if self._cmd_busy.locked() else HTTPStatus.FORBIDDEN
@@ -334,7 +376,6 @@ class HeaterMonitor:
             return HTTPStatus.CONFLICT, {"error": "Ein Befehl wird gerade gesendet."}
         try:
             now = self.clock()
-            expected = self._expected_byte(mode)
             with self._lock:
                 self._cmd_seq += 1
                 entry = {
@@ -342,20 +383,23 @@ class HeaterMonitor:
                     "time": now,
                     "iso": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
                     "mode": mode,
-                    "frame": f"5D3#{expected:02X}00",
+                    "frame": None,
                     "status": "pending",
                     "message": "",
-                    "frames_sent": None,
-                    "adopted_after_ms": None,
-                    "target_byte": None,
                     "panel_before": None,
                     "panel_after": None,
-                    "heater_confirmed": None,
                     "hint": None,
+                    "radio_emulation": False,
+                    "spoof_frames_sent": None,
+                    "spoof_payload": None,
+                    **fields,
                 }
                 self._commands.append(entry)
-            logger.info("command %d: %s (%s)", entry["id"], mode, entry["frame"])
-            threading.Thread(target=self._run_command, args=(entry,), name="dashboard-cmd", daemon=True).start()
+            logger.info(
+                "command %d: %s (%s)%s", entry["id"], mode, entry["frame"],
+                " + 0x3E5 status spoof" if entry["radio_emulation"] else "",
+            )
+            threading.Thread(target=runner, args=(entry,), name="dashboard-cmd", daemon=True).start()
         except Exception:
             self._cmd_busy.release()
             raise
@@ -368,19 +412,33 @@ class HeaterMonitor:
         flag = (e.payload[0] & PANEL_FLAG) if e and e.payload else PANEL_FLAG
         return MODES[mode] | flag
 
+    def _arm(self, spoof: bool) -> None:
+        sn = self.sniffer
+        if not sn.tx_session_enabled:
+            msg = sn.enable_tx(True)
+            if not sn.tx_session_enabled:
+                raise RuntimeError(msg)
+        if spoof and not sn.status_spoof_enabled:
+            sn.enable_status_spoof(True)  # approved by starting with --allow-status-spoof
+
+    def _finish(self, entry: dict[str, Any], update: dict[str, Any], status: str, message: str) -> None:
+        with self._lock:
+            entry.update(update, status=status, message=message, done=self.clock())
+        (logger.info if status == "ok" else logger.error)("command %d %s: %s", entry["id"], status, message)
+        self._cmd_busy.release()
+
     def _run_command(self, entry: dict[str, Any]) -> None:
         update: dict[str, Any] = {}
         try:
             sn = self.sniffer
-            if not sn.tx_session_enabled:
-                msg = sn.enable_tx(True)
-                if not sn.tx_session_enabled:
-                    raise RuntimeError(msg)
-            res = sn.set_heater_mode(entry["mode"], COMMAND_MAX_FRAMES, COMMAND_INTERVAL_MS)
+            self._arm(entry["radio_emulation"])
+            kw: dict[str, Any] = {"radio_emulation": True} if entry["radio_emulation"] else {}
+            res = sn.set_heater_mode(entry["mode"], COMMAND_MAX_FRAMES, COMMAND_INTERVAL_MS, **kw)
             status = "ok" if res["ok"] else "failed"
-            update = {k: res.get(k) for k in (
-                "frames_sent", "adopted_after_ms", "target_byte", "panel_before", "panel_after", "heater_confirmed",
-            )}
+            keys = ["frames_sent", "adopted_after_ms", "target_byte", "panel_before", "panel_after", "heater_confirmed"]
+            if entry["radio_emulation"]:
+                keys += ["spoof_frames_sent", "spoof_payload", "heater_confirmed_before_spoof"]
+            update = {k: res.get(k) for k in keys}
             if res.get("target_byte"):
                 update["frame"] = f"5D3#{int(res['target_byte'], 16):02X}00"
             if not res["ok"]:
@@ -388,10 +446,25 @@ class HeaterMonitor:
             message = res["message"]
         except Exception as e:
             status, message = "error", str(e)
-        with self._lock:
-            entry.update(update, status=status, message=message, done=self.clock())
-        (logger.info if status == "ok" else logger.error)("command %d %s: %s", entry["id"], status, message)
-        self._cmd_busy.release()
+        self._finish(entry, update, status, message)
+
+    def _run_impulse(self, entry: dict[str, Any]) -> None:
+        update: dict[str, Any] = {}
+        try:
+            self._arm(True)
+            res = self.sniffer.radio_impulse(entry["mode"].removeprefix("impulse_"), True, IMPULSE_FRAMES)
+            status = "ok" if res["ok"] else "failed"
+            update = {k: res.get(k) for k in (
+                "panel_before", "panel_after", "heater_before", "heater_after", "spoof_frames_sent", "spoof_payload",
+            )}
+            if res.get("spoof_payload"):
+                update["frame"] = f"3E5#{res['spoof_payload'].replace(' ', '')} ×{res['spoof_frames_sent']}"
+            if not res["ok"]:
+                update["hint"] = HINT_IMPULSE_IGNORED
+            message = res["message"]
+        except Exception as e:
+            status, message = "error", str(e)
+        self._finish(entry, update, status, message)
 
     def wait_idle(self, timeout: float) -> bool:
         """Block until no command is running (for tests and shutdown)."""
@@ -486,12 +559,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid body length"})
         try:
             req = json.loads(self.rfile.read(length))
-            mode = req["mode"]
-            if not isinstance(mode, str):
-                raise TypeError
-        except (ValueError, KeyError, TypeError):
-            return self._json(HTTPStatus.BAD_REQUEST, {"error": 'body must be {"mode": "heat"|"vent"|"off"}'})
-        status, body = self.server.monitor.command(mode)
+            if "impulse" in req:
+                impulse = req["impulse"]
+                if not isinstance(impulse, str):
+                    raise TypeError
+            else:
+                impulse = None
+                mode = req["mode"]
+                radio = req.get("radio_emulation", False)
+                if not isinstance(mode, str) or not isinstance(radio, bool):
+                    raise TypeError
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": 'body must be {"mode": "heat"|"vent"|"off", "radio_emulation": false|true} or {"impulse": "on"|"off"}'},
+            )
+        mon = self.server.monitor
+        status, body = mon.impulse(impulse) if impulse is not None else mon.command(mode, radio)
         self._json(status, body)
 
 
@@ -511,6 +595,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bitrate", type=int, default=100_000, help="CAN bitrate (default 100000, VW Komfort-CAN)")
     ap.add_argument("--http", type=_parse_http, default=("127.0.0.1", 8765), help="HTTP bind address (default 127.0.0.1:8765)")
     ap.add_argument("--allow-tx", action="store_true", help="allow heater commands (0x5D3) from the web UI")
+    ap.add_argument(
+        "--allow-status-spoof",
+        action="store_true",
+        help="with --allow-tx: offer radio-start emulation, which spoofs the heater's own status frame 0x3E5",
+    )
     args = ap.parse_args(argv)
     logging.getLogger().setLevel(logging.INFO)
 
@@ -524,7 +613,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: cannot open {args.port}: {e}", file=sys.stderr)
         return 1
 
-    monitor = HeaterMonitor(sniffer, args.allow_tx)
+    if args.allow_status_spoof and not args.allow_tx:
+        logger.warning("--allow-status-spoof has no effect without --allow-tx")
+    monitor = HeaterMonitor(sniffer, args.allow_tx, allow_status_spoof=args.allow_status_spoof)
     monitor.start()
     try:
         httpd = DashboardServer(args.http, monitor)
@@ -536,7 +627,13 @@ def main(argv: list[str] | None = None) -> int:
     if not httpd.loopback:
         logger.warning("listening on %s: anyone on that network can open the dashboard", args.http[0])
     host = f"[{args.http[0]}]" if ":" in args.http[0] else args.http[0]
-    logger.info("dashboard on http://%s:%d/ (TX %s)", host, httpd.server_port, "allowed" if args.allow_tx else "disabled")
+    logger.info(
+        "dashboard on http://%s:%d/ (TX %s, 0x3E5 status spoof %s)",
+        host,
+        httpd.server_port,
+        "allowed" if args.allow_tx else "disabled",
+        "allowed" if monitor.allow_status_spoof else "disabled",
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

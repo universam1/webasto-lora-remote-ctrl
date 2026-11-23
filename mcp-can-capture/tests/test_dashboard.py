@@ -9,7 +9,7 @@ import urllib.request
 import pytest
 
 from webasto_can_capture import dashboard, server
-from test_server_pty import FakeDevice, FakePanel, _fast_sleep, _real_sleep
+from test_server_pty import FakeDevice, FakeHeater, FakePanel, _fast_sleep, _real_sleep, _tx_frames
 
 OFF = bytes.fromhex("00 00 00 40 00 4C 00 00")
 HEATING = bytes.fromhex("00 0A 01 40 44 65 02 00")
@@ -77,15 +77,17 @@ def test_decode_mode_and_active():
 
 
 class _Dash:
-    def __init__(self, allow_tx, tx_allowed_by_firmware=True, panel=None):
-        self.dev = FakeDevice(tx_allowed=tx_allowed_by_firmware, panel=panel)
+    def __init__(self, allow_tx, tx_allowed_by_firmware=True, panel=None, heater=None, allow_status_spoof=False):
+        self.dev = FakeDevice(tx_allowed=tx_allowed_by_firmware, panel=panel, heater=heater)
         self.dev.frames = [(0x3E5, HEATING), (0x3E3, bytes([0, 0, 0, 0, 1, 0, 0, 0]))]
+        if heater is not None:
+            self.dev.frames.pop(0)  # the fake heater sends 0x3E5 itself
         if panel is None:
             self.dev.frames.insert(1, (0x5D3, b"\x02\x00"))
         self.dev.start()
         self.sn = server.CanSniffer()
         self.sn.connect(self.dev.port, 100000)
-        self.mon = dashboard.HeaterMonitor(self.sn, allow_tx)
+        self.mon = dashboard.HeaterMonitor(self.sn, allow_tx, allow_status_spoof=allow_status_spoof)
         self.mon.start()
         self.httpd = dashboard.DashboardServer(("127.0.0.1", 0), self.mon)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -300,3 +302,71 @@ def test_main_exits_cleanly_when_port_busy(make_dash, capsys):
     assert dashboard.main(["--port", d.dev.port, "--http", "127.0.0.1:0"]) == 2
     assert "busy" in capsys.readouterr().err
     assert d.sn.connected
+
+
+# ---------------------------------------------------------------------- 0x3E5 status spoof (radio emulation)
+
+
+def test_spoof_controls_hidden_and_refused_without_flag(make_dash):
+    d = make_dash(allow_tx=True, panel=FakePanel(byte=0x80, period_s=0.5, adopt_on_radio_bits=True), heater=FakeHeater())
+    body = d.get("/")[2].decode()
+    assert '<div id="spoof-box" hidden>' in body  # hidden until the state says otherwise
+    assert "Funkstart emulieren (0x3E5)" in body and "Funk-Impuls EIN" in body
+    s = _wait(lambda: (st := d.state())["tx"]["available"] and st)
+    assert s["tx"]["allow_status_spoof"] is False
+    status, err = d.post({"mode": "vent", "radio_emulation": True})
+    assert status == 403 and "--allow-status-spoof" in err["error"]
+    status, err = d.post({"impulse": "on"})
+    assert status == 403 and "--allow-status-spoof" in err["error"]
+    assert d.post({"mode": "vent", "radio_emulation": "yes"})[0] == 400
+    assert d.post({"impulse": 1})[0] == 400
+    _real_sleep(0.3)
+    assert d.dev.received_tx == [] and not d.dev.tx_on and d.state()["commands"] == []
+    assert not d.sn.status_spoof_enabled
+
+
+def test_spoof_flag_needs_allow_tx(make_dash):
+    d = make_dash(allow_tx=False, allow_status_spoof=True)
+    assert _wait(lambda: d.state()["device"]) and d.state()["tx"]["allow_status_spoof"] is False
+
+
+def test_vent_with_radio_emulation_logs_spoof_count(make_dash):
+    panel = FakePanel(byte=0x80, period_s=0.5, adopt_on_radio_bits=True)
+    d = make_dash(allow_tx=True, panel=panel, heater=FakeHeater(), allow_status_spoof=True)
+    s = _wait(lambda: (st := d.state())["tx"]["available"] and st["mode_5d3"] and st)
+    assert s["tx"]["allow_status_spoof"] is True
+    status, body = d.post({"mode": "vent", "radio_emulation": True})
+    assert status == 202 and body["radio_emulation"] is True and body["frame"] == "5D3#8400"
+    entry = _done(d)[0]
+    assert entry["status"] == "ok", entry
+    assert 1 <= entry["spoof_frames_sent"] <= 5
+    assert entry["spoof_payload"].startswith("89 09 ") and entry["heater_confirmed_before_spoof"] is True
+    assert entry["panel_after"] == "0x84" and "spoofed 0x3E5" in entry["message"]
+    _real_sleep(0.1)
+    assert len(_tx_frames(d.dev, 0x3E5)) == entry["spoof_frames_sent"]
+    assert not d.dev.tx_on
+    assert d.sn.status_spoof_enabled  # armed by the flag on first use
+
+    # a normal command (checkbox off) does not spoof
+    _wait(lambda: d.state()["mode_5d3"]["byte0"] == "0x84")
+    n = len(_tx_frames(d.dev, 0x3E5))
+    assert d.post({"mode": "off"})[0] == 202
+    entry = _done(d, 2)[0]
+    assert entry["radio_emulation"] is False and entry["spoof_frames_sent"] is None
+    assert len(_tx_frames(d.dev, 0x3E5)) == n
+
+
+def test_radio_impulse_button(make_dash):
+    panel = FakePanel(byte=0x80, period_s=0.5, remote_mode="vent")
+    d = make_dash(allow_tx=True, panel=panel, heater=FakeHeater(), allow_status_spoof=True)
+    _wait(lambda: (st := d.state())["tx"]["available"] and st["heater"])
+    status, body = d.post({"impulse": "on"})
+    assert status == 202 and body["mode"] == "impulse_on" and body["radio_emulation"] is True
+    entry = _done(d)[0]
+    assert entry["status"] == "ok", entry
+    assert entry["spoof_frames_sent"] == 5 and entry["spoof_payload"].startswith("81 ")
+    assert entry["panel_before"] == "0x80" and entry["panel_after"] == "0x84"
+    assert entry["heater_before"] == "off" and entry["heater_after"] == "ventilating"
+    assert entry["frame"].startswith("3E5#81") and entry["frame"].endswith("×5")
+    _real_sleep(0.1)
+    assert _tx_frames(d.dev, 0x5D3) == [] and not d.dev.tx_on

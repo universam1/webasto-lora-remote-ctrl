@@ -52,6 +52,17 @@ HEATER_MODES = {"off": 0x00, "heat": 0x02, "vent": 0x04}  # 0x5D3 byte 0, bit 7 
 PANEL_FRESH_S = 2.0  # a panel 0x5D3 younger than this gives bit 7 without a wake frame
 WAKE_WAIT_S = 0.6  # after the wake frame, wait this long for the panel's first 0x5D3
 HEATER_CONFIRM_S = 1.5  # after adoption, watch 0x3E5 this long for confirmation
+# radio-start emulation: spoofed 0x3E5 with the Telestart "radio" bits in byte 0
+RADIO_BITS = {"off": 0x02, "heat": 0x05, "vent": 0x09}  # b1 off / b0+b2 heat / b0+b3 vent
+RADIO_WAKE_BIT = 0x80  # byte 0 b7: wake Komfort-CAN
+SPOOF_CONFIRM_S = 1.5  # after our first 0x5D3, wait this long for a real 0x3E5 confirming the target
+SPOOF_DELAY_S = 0.1  # a spoof goes this long after a real 0x3E5 (heater period 200 ms)
+SPOOF_LATE_S = 0.16  # later than this after the real frame: skip, the next real one is close
+TIMELINE_MAX = 60
+IMPULSE_WAIT_3E5_S = 1.0  # radio_impulse: wait this long for a real 0x3E5 to copy (after waking)
+IMPULSE_OBSERVE_S = 3.0  # radio_impulse: watch the panel and heater this long after the first spoof
+BUS_AWAKE_S = 2.0  # no Rx frame for this long: bus asleep
+HEATER_MODE_NAMES = {0x00: "off", 0x02: "heat", 0x04: "vent"}
 
 
 def _is_native_usb(port: str) -> bool:
@@ -155,6 +166,7 @@ class CanSniffer:
         self.state = SnifferState()
         self.capture: ActiveCapture | None = None
         self.tx_session_enabled = False
+        self.status_spoof_enabled = False  # separate arm for spoofing the heater's 0x3E5
         self.tx_sent = 0
         # device-us -> host-epoch mapping, fixed at first frame after connect
         self._epoch_offset: float | None = None
@@ -199,6 +211,7 @@ class CanSniffer:
         self.ids.clear()
         self.state = SnifferState()
         self.tx_session_enabled = False
+        self.status_spoof_enabled = False
         self.tx_sent = 0
         self._epoch_offset = None
         self._last_dev_ts = self._last_dev_host = None
@@ -247,6 +260,7 @@ class CanSniffer:
                 logger.warning("close failed: %s", e)
         port, self.ser, self.port = self.port, None, None
         self.tx_session_enabled = False
+        self.status_spoof_enabled = False
         msg.append(f"disconnected from {port}" if port else "not connected")
         return "\n".join(msg)
 
@@ -453,7 +467,10 @@ class CanSniffer:
             lines.append("device status: none received")
         if self.state.bus_params:
             lines.append(_fmt_bus(self.state.bus_params))
-        lines.append(f"tx: session_enabled={self.tx_session_enabled}, frames_sent={self.tx_sent}")
+        lines.append(
+            f"tx: session_enabled={self.tx_session_enabled}, status_spoof_enabled={self.status_spoof_enabled}, "
+            f"frames_sent={self.tx_sent}"
+        )
         lines.append(f"capture: {cap.name} ({cap.rx} rx, {cap.tx} tx, {cap.marks} markers)" if cap else "capture: none")
         return "\n".join(lines)
 
@@ -504,7 +521,8 @@ class CanSniffer:
         if not confirm:
             st = self._request(gvret.encode_set_tx(False), gvret.DeviceStatus)
             self.tx_session_enabled = False
-            return "TX disabled for this session. " + (_fmt_status(st) if st else "(no status reply)")
+            self.status_spoof_enabled = False
+            return "TX disabled for this session (status spoof disarmed too). " + (_fmt_status(st) if st else "(no status reply)")
         # Only probe the firmware here; the device stays listen-only. send_frame()
         # switches it to normal mode for the duration of each burst.
         st = self._request(gvret.cmd(gvret.CMD_STATUS), gvret.DeviceStatus)
@@ -519,6 +537,23 @@ class CanSniffer:
             "it to normal mode, sends, and returns it to listen-only.\n"
             + _fmt_status(st)
             + ("\n" + _fmt_bus(bp) if bp else "")
+        )
+
+    def enable_status_spoof(self, confirm: bool) -> str:
+        """Separate session arm for spoofing the heater's own status frame 0x3E5 (radio emulation).
+
+        Needed in addition to enable_tx. Only call with confirm=True after the user explicitly
+        approved transmitting frames under the heater's ID. Sends nothing to the device.
+        """
+        self._require()
+        if not confirm:
+            self.status_spoof_enabled = False
+            return "0x3E5 status spoof disarmed for this session."
+        self.status_spoof_enabled = True
+        note = "" if self.tx_session_enabled else " TX itself is not armed yet: enable_tx(confirm=true) is still required."
+        return (
+            "0x3E5 status spoof armed for this session: set_heater_mode(radio_emulation=true) may now send "
+            "frames under the heater's own status ID 0x3E5." + note
         )
 
     def _set_device_tx(self, on: bool) -> gvret.BusParams | None:
@@ -590,13 +625,28 @@ class CanSniffer:
                 self._write_capture_frame(Frame(ts, can_id, extended, "Tx", 0, bytes(data)))
                 self.capture.tx += 1
 
-    def set_heater_mode(self, mode: str, max_frames: int = 10, interval_ms: int = 500) -> dict[str, Any]:
+    def set_heater_mode(
+        self,
+        mode: str,
+        max_frames: int = 10,
+        interval_ms: int = 500,
+        radio_emulation: bool = False,
+        radio_wake_bit: bool = True,
+        radio_frames: int = 5,
+    ) -> dict[str, Any]:
         """Request off / heat / vent from the roof control unit via 0x5D3 and verify it was adopted.
 
         The roof unit ("panel") sends 0x5D3 every 500 ms. We send `5D3 <mode | panel bit 7> 00`
         one frame per `interval_ms` until a panel frame carries exactly that byte 0, then stop.
         The device is switched to normal mode once for the whole sequence and back to
         listen-only in `finally`.
+
+        With `radio_emulation` (needs enable_status_spoof in addition to enable_tx) the heater's
+        own status frame 0x3E5 is spoofed as a Telestart radio start would report it: after a real
+        0x3E5 confirms the target state (within SPOOF_CONFIRM_S of our first 0x5D3), up to
+        `radio_frames` frames `3E5 <radio bits [| 0x80]> <bytes 1..7 of that real frame>` are sent,
+        each SPOOF_DELAY_S after a confirming real 0x3E5 and at most one per real-frame interval,
+        interleaved with the 0x5D3 schedule. Spoofing stops at the panel echo.
         """
         if mode not in HEATER_MODES:
             raise ValueError(f"mode must be one of {', '.join(HEATER_MODES)}")
@@ -604,12 +654,19 @@ class CanSniffer:
             raise ValueError("max_frames must be 1..50")
         if not 50 <= interval_ms <= 5000:
             raise ValueError("interval_ms must be 50..5000")
+        if radio_emulation and not 1 <= radio_frames <= 20:
+            raise ValueError("radio_frames must be 1..20")
         self._require()
         st = self.state.status
         if not self.tx_session_enabled:
             raise PermissionError("TX not enabled in this session; call enable_tx(confirm=true) first")
         if not st or not st.tx_allowed_by_firmware:
             raise PermissionError("device status does not report tx_allowed_by_firmware")
+        if radio_emulation and not self.status_spoof_enabled:
+            raise PermissionError(
+                "radio_emulation spoofs the heater's own status frame 0x3E5 and needs a separate arm: "
+                "call enable_status_spoof(confirm=true) first, only after the user explicitly approved it"
+            )
 
         mode_bits = HEATER_MODES[mode]
         interval = interval_ms / 1000.0
@@ -628,6 +685,18 @@ class CanSniffer:
         t_first: float | None = None
         seen = 0
         heater_confirmed: bool | None = None
+        tx_log: list[tuple[float, int, bytes]] = []  # (host time, id, data) of everything we sent
+
+        # radio emulation state
+        radio_b0 = RADIO_BITS[mode] | (RADIO_WAKE_BIT if radio_wake_bit else 0)
+        spoof_confirmed_at: float | None = None  # host time of the first confirming real 0x3E5
+        spoof_window_closed = False
+        real_3e5_seen = 0
+        spoof_due: float | None = None  # when to send the spoof for the latest confirming real frame
+        spoof_ref: float | None = None  # host time of that real frame
+        spoof_data: bytes | None = None  # payload for it (bytes 1..7 copied from it)
+        spoof_last_payload: bytes | None = None
+        spoofs_sent = 0
 
         bp = self._set_device_tx(True)
         if bp is None or bp.can0_listen_only:
@@ -644,6 +713,7 @@ class CanSniffer:
                     self._write(gvret.encode_tx_frame(ID_MODE, data, False))
                     sent_at = time.time()
                     frames_sent += 1
+                    tx_log.append((sent_at, ID_MODE, data))
                     self._log_tx(ID_MODE, False, data)
                     if t_first is None:
                         t_first = sent_at
@@ -655,7 +725,21 @@ class CanSniffer:
                     seen, new = self.rx_since(seen)
                     for e in new:
                         f = e.frame
-                        if f.can_id != ID_MODE or f.extended or f.direction != "Rx" or not f.data:
+                        if f.extended or f.direction != "Rx" or not f.data:
+                            continue
+                        if f.can_id == ID_STATUS and radio_emulation and not spoof_window_closed:
+                            real_3e5_seen += 1
+                            confirms = _status_confirms(mode, f.data)
+                            if spoof_confirmed_at is None and confirms and e.host_time <= t_first + SPOOF_CONFIRM_S:
+                                spoof_confirmed_at = e.host_time
+                            if spoof_confirmed_at is not None and confirms and len(f.data) == 8:
+                                # one spoof per real-frame interval, after a confirming real frame only
+                                spoof_ref, spoof_due = e.host_time, e.host_time + SPOOF_DELAY_S
+                                spoof_data = bytes([radio_b0]) + bytes(f.data[1:8])
+                            else:
+                                spoof_due = None
+                            continue
+                        if f.can_id != ID_MODE:
                             continue
                         b0 = f.data[0]
                         panel_after = b0
@@ -671,7 +755,20 @@ class CanSniffer:
                             adopted_at = e.host_time
                             break
                 if adopted_at is not None:
-                    break
+                    break  # panel echo: stop 0x5D3 and spoofing
+                if radio_emulation and t_first is not None and not spoof_window_closed:
+                    now = time.time()
+                    if spoof_confirmed_at is None and now > t_first + SPOOF_CONFIRM_S:
+                        spoof_window_closed = True  # no confirming real 0x3E5: never spoof
+                        spoof_due = None
+                    if spoof_due is not None and spoof_ref is not None and spoof_data is not None and now >= spoof_due:
+                        if spoofs_sent < radio_frames and now - spoof_ref <= SPOOF_LATE_S:
+                            self._write(gvret.encode_tx_frame(ID_STATUS, spoof_data, False))
+                            tx_log.append((time.time(), ID_STATUS, spoof_data))
+                            spoofs_sent += 1
+                            spoof_last_payload = spoof_data
+                            self._log_tx(ID_STATUS, False, spoof_data)
+                        spoof_due = None  # sent or too late: wait for the next real frame
                 if frames_sent >= max_frames and time.time() >= next_send:
                     break  # watched one full slot after the last frame
                 time.sleep(0.01)
@@ -698,7 +795,7 @@ class CanSniffer:
             )
         if first_target != target:
             message += f" Wake frame used 0x{first_target:02X}, panel bit 7 required 0x{target:02X}."
-        return {
+        result: dict[str, Any] = {
             "ok": ok,
             "mode": mode,
             "target_byte": f"0x{target:02X}",
@@ -708,7 +805,269 @@ class CanSniffer:
             "adopted_after_ms": ms,
             "heater_confirmed": heater_confirmed,
             "message": message,
+            "radio_emulation": radio_emulation,
         }
+        if radio_emulation:
+            confirmed_before = spoof_confirmed_at is not None
+            if confirmed_before:
+                cms = int(round((spoof_confirmed_at - t_first) * 1000)) if t_first else 0
+                message += (
+                    f" Radio emulation: heater confirmed {mode} in 0x3E5 after {cms} ms; "
+                    f"{spoofs_sent} spoofed 0x3E5 frame(s) sent"
+                    + (f" (3E5#{spoof_last_payload.hex().upper()})." if spoof_last_payload else ".")
+                )
+            else:
+                why = "none of them confirmed" if real_3e5_seen else "no 0x3E5 received"
+                message += (
+                    f" Radio emulation: no confirming 0x3E5 from the heater within "
+                    f"{int(SPOOF_CONFIRM_S * 1000)} ms ({why}); no spoof sent."
+                )
+            result["message"] = message
+            result.update(
+                spoof_frames_sent=spoofs_sent,
+                spoof_payload=spoof_last_payload.hex(" ").upper() if spoof_last_payload else None,
+                heater_confirmed_before_spoof=confirmed_before,
+            )
+        if t_first is not None:
+            result["timeline"], dropped = self._timeline(t_first, tx_log)
+            if dropped:
+                result["timeline_omitted"] = dropped
+        return result
+
+    def _last_rx(self, can_id: int) -> _RxEntry | None:
+        """Newest Rx frame with `can_id` (standard ID, non-empty) in the ring buffer, or None."""
+        with self._lock:
+            for e in reversed(self.ring):
+                f = e.frame
+                if f.can_id == can_id and not f.extended and f.direction == "Rx" and f.data:
+                    return e
+        return None
+
+    def radio_impulse(
+        self, kind: str, wake_bit: bool = True, frames: int = 5, observe_s: float = IMPULSE_OBSERVE_S
+    ) -> dict[str, Any]:
+        """Emulate a VW radio remote (Telestart hand transmitter) ON or OFF impulse.
+
+        The hand transmitter only sends an impulse; the roof unit picks mode and run time itself
+        (menu FERNBED). The heater reports such a start in 0x3E5 byte 0 (b0 on via radio, b1 off
+        via radio). No 0x5D3 command is sent: only `frames` spoofed 0x3E5
+        `<0x01|0x02 [| 0x80]> <bytes 1..7 of the latest real 0x3E5>`, each SPOOF_DELAY_S after a
+        real heater 0x3E5, at most one per real-frame interval. A sleeping bus is first woken with
+        one neutral 0x5D3 equal to the panel's last value. Then the device returns to listen-only
+        and the bus is observed for `observe_s` seconds.
+
+        Needs enable_tx and enable_status_spoof, like set_heater_mode(radio_emulation=True).
+        """
+        if kind not in ("on", "off"):
+            raise ValueError("kind must be 'on' or 'off'")
+        if not 1 <= frames <= 20:
+            raise ValueError("frames must be 1..20")
+        if not 0.5 <= observe_s <= 10:
+            raise ValueError("observe_s must be 0.5..10")
+        self._require()
+        st = self.state.status
+        if not self.tx_session_enabled:
+            raise PermissionError("TX not enabled in this session; call enable_tx(confirm=true) first")
+        if not st or not st.tx_allowed_by_firmware:
+            raise PermissionError("device status does not report tx_allowed_by_firmware")
+        if not self.status_spoof_enabled:
+            raise PermissionError(
+                "radio_impulse spoofs the heater's own status frame 0x3E5 and needs a separate arm: "
+                "call enable_status_spoof(confirm=true) first, only after the user explicitly approved it"
+            )
+
+        b0 = (0x01 if kind == "on" else 0x02) | (RADIO_WAKE_BIT if wake_bit else 0)
+        t0 = time.time()
+        with self._lock:
+            newest = self.ring[-1].host_time if self.ring else None
+        asleep = newest is None or t0 - newest > BUS_AWAKE_S
+        last_panel = self._last_panel_mode()
+        last_status = self._last_rx(ID_STATUS)
+        panel_before = last_panel.frame.data[0] if last_panel and t0 - last_panel.host_time <= PANEL_FRESH_S else None
+        heater_before = bytes(last_status.frame.data) if last_status and t0 - last_status.host_time <= PANEL_FRESH_S else None
+
+        tx_log: list[tuple[float, int, bytes]] = []
+        wake_frame: bytes | None = None
+        seen = self.total_rx
+        spoofs_sent = 0
+        spoof_last: bytes | None = None
+        t_first: float | None = None  # first Tx (wake frame or first spoof)
+        t_first_spoof: float | None = None
+        real_seen = False
+
+        bp = self._set_device_tx(True)
+        if bp is None or bp.can0_listen_only:
+            self._set_device_tx(False)
+            raise RuntimeError("device did not leave listen-only mode; nothing sent")
+        try:
+            if asleep:
+                # neutral wake frame: the panel's own last value (bit 7 and mode unchanged), else 0x80 = off
+                wake_frame = bytes([last_panel.frame.data[0] if last_panel else 0x80, 0x00])
+                self._write(gvret.encode_tx_frame(ID_MODE, wake_frame, False))
+                t_first = time.time()
+                tx_log.append((t_first, ID_MODE, wake_frame))
+                self._log_tx(ID_MODE, False, wake_frame)
+            start = time.time()
+            first_deadline = start + IMPULSE_WAIT_3E5_S
+            deadline = first_deadline + frames * 0.2 * 3  # generous: one slot per real frame plus misses
+            due: float | None = None
+            ref: float | None = None
+            payload: bytes | None = None
+            while spoofs_sent < frames:
+                seen, new = self.rx_since(seen)
+                for e in new:
+                    f = e.frame
+                    if f.extended or f.direction != "Rx" or not f.data:
+                        continue
+                    if f.can_id == ID_MODE and t_first_spoof is None:
+                        panel_before = f.data[0]  # e.g. the panel's first frame after waking
+                    if f.can_id == ID_STATUS and len(f.data) == 8:
+                        real_seen = True
+                        if t_first_spoof is None:
+                            heater_before = bytes(f.data)
+                        ref, due = e.host_time, e.host_time + SPOOF_DELAY_S
+                        payload = bytes([b0]) + bytes(f.data[1:8])
+                now = time.time()
+                if not real_seen and now > first_deadline:
+                    break  # no heater 0x3E5: nothing to copy, no spoof
+                if now > deadline:
+                    break
+                if due is not None and ref is not None and payload is not None and now >= due:
+                    if now - ref <= SPOOF_LATE_S:
+                        self._write(gvret.encode_tx_frame(ID_STATUS, payload, False))
+                        sent_at = time.time()
+                        tx_log.append((sent_at, ID_STATUS, payload))
+                        self._log_tx(ID_STATUS, False, payload)
+                        spoofs_sent += 1
+                        spoof_last = payload
+                        if t_first is None:
+                            t_first = sent_at
+                        if t_first_spoof is None:
+                            t_first_spoof = sent_at
+                    due = None
+                time.sleep(0.01)
+            time.sleep(0.05)  # let the last frame leave the TX queue
+        finally:
+            self._set_device_tx(False)
+
+        # observe the reaction (device listen-only again)
+        panel_after: int | None = None
+        panel_changed_at: float | None = None
+        heater_after: bytes | None = None
+        heater_changed_at: float | None = None
+        if t_first_spoof is not None:
+            end = time.time() + observe_s
+            while time.time() < end:
+                time.sleep(min(0.1, max(0.0, end - time.time())))
+            with self._lock:
+                recent = list(itertools.takewhile(lambda e: e.host_time >= t_first_spoof, reversed(self.ring)))
+            for e in reversed(recent):
+                f = e.frame
+                if f.extended or f.direction != "Rx" or not f.data:
+                    continue
+                if f.can_id == ID_MODE:
+                    panel_after = f.data[0]
+                    if panel_changed_at is None and panel_before is not None and panel_after != panel_before:
+                        panel_changed_at = e.host_time
+                elif f.can_id == ID_STATUS:
+                    heater_after = bytes(f.data)
+                    if (
+                        heater_changed_at is None
+                        and heater_before is not None
+                        and _heater_state(heater_after) != _heater_state(heater_before)
+                    ):
+                        heater_changed_at = e.host_time
+        if panel_after is None:
+            panel_after = panel_before
+        if heater_after is None:
+            heater_after = heater_before
+
+        def mode_name(b: int | None) -> str | None:
+            return None if b is None else HEATER_MODE_NAMES.get(b & 0x7F, f"unknown(0x{b:02X})")
+
+        def ms(t: float | None) -> int | None:
+            return None if t is None or t_first_spoof is None else int(round((t - t_first_spoof) * 1000))
+
+        panel_changed = panel_changed_at is not None
+        expected = panel_after is not None and ((panel_after & 0x7F) != 0 if kind == "on" else (panel_after & 0x7F) == 0)
+        ok = panel_changed and expected
+        hb = _heater_state(heater_before) if heater_before else None
+        ha = _heater_state(heater_after) if heater_after else None
+        hx = lambda b: None if b is None else f"0x{b:02X}"  # noqa: E731
+        if not spoofs_sent:
+            message = (
+                f"radio impulse {kind}: no real 0x3E5 from the heater within {int(IMPULSE_WAIT_3E5_S * 1000)} ms"
+                + (" after the wake frame" if wake_frame else "")
+                + "; no spoof sent."
+            )
+        else:
+            message = f"radio impulse {kind}: {spoofs_sent} spoofed 3E5#{spoof_last.hex().upper()} sent. "  # type: ignore[union-attr]
+            if panel_changed:
+                message += (
+                    f"Panel changed 0x5D3 on its own from {hx(panel_before)} to {hx(panel_after)} "
+                    f"({mode_name(panel_after)}) after {ms(panel_changed_at)} ms"
+                    + ("." if ok else f", not the expected {'non-off mode' if kind == 'on' else 'off'}.")
+                )
+            else:
+                message += f"Panel 0x5D3 unchanged ({hx(panel_after)}) during {observe_s:g} s."
+            message += (
+                f" Heater state {hb} -> {ha}" + (f" after {ms(heater_changed_at)} ms." if heater_changed_at else " (unchanged).")
+            )
+        if wake_frame:
+            message += f" Bus was asleep: woke it with 5D3#{wake_frame.hex().upper()}."
+        result: dict[str, Any] = {
+            "ok": ok,
+            "kind": kind,
+            "panel_before": hx(panel_before),
+            "panel_after": hx(panel_after),
+            "panel_changed": panel_changed,
+            "panel_changed_after_ms": ms(panel_changed_at),
+            "heater_before": hb,
+            "heater_after": ha,
+            "heater_before_raw": heater_before.hex(" ").upper() if heater_before else None,
+            "heater_after_raw": heater_after.hex(" ").upper() if heater_after else None,
+            "heater_changed_after_ms": ms(heater_changed_at),
+            "spoof_frames_sent": spoofs_sent,
+            "spoof_payload": spoof_last.hex(" ").upper() if spoof_last else None,
+            "wake_frame": wake_frame.hex(" ").upper() if wake_frame else None,
+            "message": message,
+            "timeline": [],
+        }
+        if t_first is not None:
+            result["timeline"], dropped = self._timeline(t_first, tx_log)
+            if dropped:
+                result["timeline_omitted"] = dropped
+        return result
+
+    def _timeline(self, t_first: float, tx_log: list[tuple[float, int, bytes]]) -> tuple[list[list[Any]], int]:
+        """Compact [t_ms, id, dir, hex] list of 0x5D3 and 0x3E5 (Rx from the ring plus our Tx) since
+        `t_first`. Above TIMELINE_MAX entries, unchanged Rx repeats not next to a Tx frame are dropped,
+        then the middle is cut. Returns (entries, number of entries dropped)."""
+        with self._lock:
+            rx = list(itertools.takewhile(lambda e: e.host_time >= t_first, reversed(self.ring)))
+        ev = [
+            (e.host_time, e.frame.can_id, "Rx", bytes(e.frame.data))
+            for e in reversed(rx)
+            if e.frame.can_id in (ID_MODE, ID_STATUS) and not e.frame.extended and e.frame.direction == "Rx"
+        ]
+        ev += [(t, cid, "Tx", d) for t, cid, d in tx_log]
+        ev.sort(key=lambda x: x[0])
+        total = len(ev)
+        if total > TIMELINE_MAX:
+            keep, prev = [], {}
+            for i, x in enumerate(ev):
+                key = (x[1], x[2])
+                near_tx = any(0 <= j < total and ev[j][2] == "Tx" for j in (i - 1, i + 1))
+                if x[2] == "Rx" and prev.get(key) == x[3] and not near_tx:
+                    continue
+                prev[key] = x[3]
+                keep.append(x)
+            ev = keep
+            if len(ev) > TIMELINE_MAX:
+                head = TIMELINE_MAX * 2 // 3
+                ev = ev[:head] + ev[-(TIMELINE_MAX - head):]
+        out = [[int(round((t - t_first) * 1000)), f"{cid:03X}", d, data.hex().upper()] for t, cid, d, data in ev]
+        return out, total - len(out)
 
     def _confirm_heater(self, mode: str, since: float, timeout_s: float = HEATER_CONFIRM_S) -> bool | None:
         """Watch 0x3E5 after adoption: heat -> control LED (byte1 b1), vent -> byte7 b0, off -> both 0.
@@ -726,13 +1085,31 @@ class CanSniffer:
                 if f.can_id != ID_STATUS or f.extended or f.direction != "Rx":
                     continue
                 seen_any = True
-                d = analysis.decode_3e5_payload(f.data)
-                led, vent = d["control_led"], d["ventilation_active"]
-                if (mode == "heat" and led) or (mode == "vent" and vent) or (mode == "off" and not led and not vent):
+                if _status_confirms(mode, f.data):
                     return True
             if time.time() >= deadline:
                 return False if seen_any else None
             time.sleep(0.02)
+
+
+def _heater_state(data: bytes) -> str:
+    """Derived heater state from 0x3E5 (same rule as the dashboard): off, heating, ventilating, run_on."""
+    d = analysis.decode_3e5_payload(data)
+    if d["ventilation_active"]:
+        return "ventilating"
+    if d["control_led"] or d["combustion_on"] or d["heating_power_raw"]:
+        return "heating"
+    if d["water_pump_request"]:
+        return "run_on"
+    return "off"
+
+
+def _status_confirms(mode: str, data: bytes) -> bool:
+    """True if a 0x3E5 payload shows `mode`: heat -> control LED (byte1 b1), vent -> ventilation
+    active (byte7 b0), off -> both clear."""
+    d = analysis.decode_3e5_payload(data)
+    led, vent = d["control_led"], d["ventilation_active"]
+    return bool((mode == "heat" and led) or (mode == "vent" and vent) or (mode == "off" and not led and not vent))
 
 
 # ---------------------------------------------------------------------- formatting helpers
@@ -924,7 +1301,23 @@ async def send_frame(id: str, data_hex: str, extended: bool = False, count: int 
 
 
 @mcp.tool()
-async def set_heater_mode(mode: str, max_frames: int = 10) -> str:
+async def enable_status_spoof(confirm: bool) -> str:
+    """Arm spoofing of the heater's OWN status frame 0x3E5 for this session (needed for
+    set_heater_mode(radio_emulation=true), in addition to enable_tx). This transmits frames under
+    the Webasto heater's ID, which is a bigger step than sending roof-unit commands: only call with
+    confirm=true after the user explicitly approved 0x3E5 spoofing in this conversation.
+    confirm=false disarms. Sends nothing to the device by itself."""
+    return await _run(sniffer.enable_status_spoof, confirm)
+
+
+@mcp.tool()
+async def set_heater_mode(
+    mode: str,
+    max_frames: int = 10,
+    radio_emulation: bool = False,
+    radio_wake_bit: bool = True,
+    radio_frames: int = 5,
+) -> str:
     """Switch the T5.2 parking heater via the roof control unit (0x5D3) and verify the result.
     mode: "off", "heat" or "vent". Same TX gating as send_frame (enable_tx(confirm=true) first).
 
@@ -936,11 +1329,57 @@ async def set_heater_mode(mode: str, max_frames: int = 10) -> str:
     carries the target byte (typically after 1-4 frames), and stops. Fails with "not adopted
     by roof unit" after max_frames (known: vent-on with bit 7 set is never adopted). After
     adoption, 0x3E5 is checked (heat: control LED, vent: ventilation bit, off: both clear).
+
+    radio_emulation=true (experimental, Telestart radio-start hypothesis) additionally SPOOFS THE
+    HEATER'S OWN STATUS FRAME 0x3E5. It needs explicit user approval and a separate
+    enable_status_spoof(confirm=true) besides enable_tx; otherwise it is refused. After a real
+    0x3E5 confirms the target state (within 1.5 s of the first 0x5D3), up to radio_frames
+    (1..20) frames `3E5 <radio bits> <bytes 1..7 of that real frame>` are sent, each ~100 ms after
+    a confirming real 0x3E5, at most one per 200 ms heater interval, interleaved with 0x5D3 and
+    stopped at the panel echo. Radio bits in byte 0: vent 0x09, heat 0x05, off 0x02, plus 0x80
+    (wake Komfort-CAN) if radio_wake_bit. No confirming real 0x3E5: no spoof, reported.
+
     Returns JSON: ok, mode, target_byte, panel_before, panel_after, frames_sent,
-    adopted_after_ms, heater_confirmed, message."""
+    adopted_after_ms, heater_confirmed, message, radio_emulation, timeline ([t_ms, id, dir, hex]
+    for 0x5D3/0x3E5 from the first Tx, max ~60), and with radio_emulation: spoof_frames_sent,
+    spoof_payload, heater_confirmed_before_spoof."""
 
     def work() -> str:
-        return json.dumps(sniffer.set_heater_mode(mode.strip().lower(), max(1, min(max_frames, 50))))
+        return json.dumps(
+            sniffer.set_heater_mode(
+                mode.strip().lower(),
+                max(1, min(max_frames, 50)),
+                radio_emulation=radio_emulation,
+                radio_wake_bit=radio_wake_bit,
+                radio_frames=radio_frames,
+            )
+        )
+
+    return await _run(work)
+
+
+@mcp.tool()
+async def radio_impulse(kind: str, wake_bit: bool = True, frames: int = 5, observe_s: float = 3.0) -> str:
+    """Emulate a VW radio remote (Telestart hand transmitter) ON or OFF impulse by SPOOFING THE
+    HEATER'S OWN STATUS FRAME 0x3E5. Needs explicit user approval: enable_tx(confirm=true) and
+    enable_status_spoof(confirm=true) first, otherwise refused. kind: "on" or "off".
+
+    The hand transmitter only sends an impulse; the roof unit chooses mode and run time itself
+    (menu FERNBED), and the heater reports the start in 0x3E5 byte 0 (b0 on via radio, b1 off via
+    radio). No 0x5D3 command is sent. `frames` (default 5) spoofed frames
+    `3E5 <01|02, +0x80 if wake_bit> <bytes 1..7 of the latest real 0x3E5>` go out, each ~100 ms
+    after a real heater 0x3E5, at most one per 200 ms interval. A sleeping bus is woken first
+    with one neutral 0x5D3 equal to the panel's last value; then up to 1 s wait for a real 0x3E5
+    (none: no spoof). The device returns to listen-only, and panel and heater are observed for
+    `observe_s` s. Returns JSON: ok (panel changed its 0x5D3 on its own to a non-off mode for
+    "on", to off for "off"), panel_before, panel_after, panel_changed, panel_changed_after_ms,
+    heater_before/after (state) and *_raw, heater_changed_after_ms, spoof_frames_sent,
+    spoof_payload, wake_frame, timeline ([t_ms, id, dir, hex]), message."""
+
+    def work() -> str:
+        return json.dumps(
+            sniffer.radio_impulse(kind.strip().lower(), wake_bit, max(1, min(frames, 20)), max(0.5, min(observe_s, 10.0)))
+        )
 
     return await _run(work)
 

@@ -112,6 +112,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 #cmd-result { margin: 6px 0 0; font-size: 13px; min-height: 1.4em; }
 #cmd-hint { display: none; margin: 8px 0 0; background: var(--crit-wash); color: var(--critical-text); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; }
 #panel-byte { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
+[hidden] { display: none !important; }
+#spoof-box { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--grid); display: grid; gap: 10px; }
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.check input { width: 18px; height: 18px; margin: 0; }
+.buttons.two { grid-template-columns: repeat(2, 1fr); }
+#spoof-box .note { margin: 0; font-size: 12px; color: var(--critical-text); }
 
 /* charts */
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
@@ -194,6 +200,14 @@ dialog button { padding: 10px 16px; min-height: 0; }
       <button type="button" data-mode="vent">Lüften</button>
       <button type="button" data-mode="off">Aus</button>
     </div>
+    <div id="spoof-box" hidden>
+      <label class="check"><input type="checkbox" id="radio-emu"> Funkstart emulieren (0x3E5)</label>
+      <div class="buttons two">
+        <button type="button" data-impulse="on">Funk-Impuls EIN</button>
+        <button type="button" data-impulse="off">Funk-Impuls AUS</button>
+      </div>
+      <p class="note">Experimentell: sendet gefälschte Statusframes 0x3E5 des Heizgeräts (Funk-Bits in Byte 0). Nur mit --allow-status-spoof.</p>
+    </div>
     <p id="tx-reason"></p>
     <p id="cmd-result"></p>
     <p id="cmd-hint" role="status"></p>
@@ -249,7 +263,7 @@ dialog button { padding: 10px 16px; min-height: 0; }
 <dialog id="dlg">
   <form method="dialog">
     <p id="dlg-text" style="margin-top:0"></p>
-    <p class="small muted" style="margin:0">Sendet 0x5D3 auf den Komfort-CAN, bis das Bedienteil den Wert übernimmt (max. 10 Frames).</p>
+    <p class="small muted" style="margin:0" id="dlg-detail"></p>
     <div class="row">
       <button value="cancel" type="submit">Abbrechen</button>
       <button value="ok" type="submit" id="dlg-ok">Senden</button>
@@ -260,7 +274,10 @@ dialog button { padding: 10px 16px; min-height: 0; }
 <script>
 "use strict";
 const STATE_DE = { off: "Aus", heating: "Heizen", ventilating: "Lüften", run_on: "Nachlauf" };
-const MODE_DE = { off: "Aus", heat: "Heizen", vent: "Lüften" };
+const MODE_DE = { off: "Aus", heat: "Heizen", vent: "Lüften", impulse_on: "Funk-Impuls EIN", impulse_off: "Funk-Impuls AUS" };
+const DETAIL_5D3 = "Sendet 0x5D3 auf den Komfort-CAN, bis das Bedienteil den Wert übernimmt (max. 10 Frames).";
+const DETAIL_EMU = " Zusätzlich bis zu 5 gefälschte 0x3E5 mit Funk-Bits (Funkstart-Emulation).";
+const DETAIL_IMPULSE = "Sendet kein 0x5D3, nur 5 gefälschte 0x3E5 mit Funk-Bit (wie die Funk-Fernbedienung) und beobachtet 3 s die Reaktion.";
 const FIELD_DE = {
   on_via_radio: "Ein per Funk", off_via_radio: "Aus per Funk", heating_on: "Heizen ein",
   ventilation_on: "Lüften ein", ac_off: "Klima aus", heater_mode_activating: "Heizmodus aktivierend",
@@ -462,10 +479,14 @@ function render(s) {
   $("v-txflag").textContent = s.tx.allow_tx_flag ? "erlaubt (--allow-tx)" : "gesperrt";
 
   // commands
-  for (const b of document.querySelectorAll("button[data-mode]")) {
+  for (const b of document.querySelectorAll("button[data-mode], button[data-impulse]")) {
     b.disabled = !s.tx.available || pending;
     b.title = s.tx.available ? "" : (s.tx.reason || "");
   }
+  spoofAllowed = !!s.tx.allow_status_spoof;
+  $("spoof-box").hidden = !spoofAllowed;
+  $("radio-emu").disabled = !spoofAllowed;
+  if (!spoofAllowed) $("radio-emu").checked = false;
   const m = s.mode_5d3;
   $("panel-byte").textContent = "Bedienteil 0x5D3: " + (m
     ? m.byte0 + " = " + (MODE_DE[m.mode] || m.mode) + ", Bit 7 " + (m.panel_flag ? "gesetzt" : "nicht gesetzt") + (m.stale ? " (letzter Stand vor " + ago(m.age_s) + ")" : "")
@@ -494,6 +515,10 @@ function render(s) {
     tag.className = c.status === "ok" ? "ok" : (c.status === "error" || c.status === "failed") ? "bad" : "";
     tag.textContent = { ok: "übernommen", failed: "nicht übernommen", error: "Fehler" }[c.status] || "läuft …";
     r.appendChild(tag);
+    if (c.spoof_frames_sent !== null && c.spoof_frames_sent !== undefined)
+      r.appendChild(document.createTextNode(" · Funkstart: " + c.spoof_frames_sent + "× 0x3E5 gesendet" + (c.spoof_payload ? " (" + c.spoof_payload + ")" : "")));
+    if (c.heater_before && c.heater_after)
+      r.appendChild(document.createTextNode(" · Heizgerät " + (STATE_DE[c.heater_before] || c.heater_before) + " → " + (STATE_DE[c.heater_after] || c.heater_after)));
     if (c.status === "ok" && c.heater_confirmed !== null && c.heater_confirmed !== undefined)
       r.appendChild(document.createTextNode(" · 0x3E5 " + (c.heater_confirmed ? "bestätigt" : "noch nicht bestätigt")));
     if (c.hint) r.appendChild(document.createTextNode(" · " + c.hint));
@@ -530,25 +555,38 @@ async function poll() {
 
 // ------------------------------------------------------------------ commands
 let pending = false;
+let spoofAllowed = false;
 const dlg = $("dlg");
+function ask(text, detail, body, label) {
+  $("dlg-text").textContent = text;
+  $("dlg-detail").textContent = detail;
+  dlg.returnValue = "";
+  dlg.onclose = () => { if (dlg.returnValue === "ok") send(body, label); };
+  dlg.showModal();
+}
 for (const b of document.querySelectorAll("button[data-mode]")) {
   b.addEventListener("click", () => {
     const mode = b.dataset.mode;
-    $("dlg-text").textContent = "Standheizung wirklich auf „" + MODE_DE[mode] + "“ schalten?";
-    dlg.returnValue = "";
-    dlg.onclose = () => { if (dlg.returnValue === "ok") send(mode); };
-    dlg.showModal();
+    const emu = spoofAllowed && $("radio-emu").checked;
+    ask("Standheizung wirklich auf „" + MODE_DE[mode] + "“ schalten?" + (emu ? " (mit Funkstart-Emulation)" : ""),
+      DETAIL_5D3 + (emu ? DETAIL_EMU : ""), emu ? { mode, radio_emulation: true } : { mode }, MODE_DE[mode]);
   });
 }
-async function send(mode) {
+for (const b of document.querySelectorAll("button[data-impulse]")) {
+  b.addEventListener("click", () => {
+    const label = MODE_DE["impulse_" + b.dataset.impulse];
+    ask("„" + label + "“ wirklich senden?", DETAIL_IMPULSE, { impulse: b.dataset.impulse }, label);
+  });
+}
+async function send(body, label) {
   pending = true;
   const res = $("cmd-result");
-  res.className = ""; res.textContent = "Sende „" + MODE_DE[mode] + "“ …";
+  res.className = ""; res.textContent = "Sende „" + label + "“ …";
   try {
-    const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) { res.className = "bad"; res.textContent = "Abgelehnt: " + (body.error || "HTTP " + r.status); }
-    else { res.textContent = "Befehl angenommen, wird gesendet, bis das Bedienteil übernimmt (max. ca. 6 s)."; }
+    const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const reply = await r.json().catch(() => ({}));
+    if (!r.ok) { res.className = "bad"; res.textContent = "Abgelehnt: " + (reply.error || "HTTP " + r.status); }
+    else { res.textContent = body.impulse ? "Impuls angenommen, sendet 0x3E5 und beobachtet 3 s die Reaktion." : "Befehl angenommen, wird gesendet, bis das Bedienteil übernimmt (max. ca. 6 s)."; }
   } catch (e) {
     res.className = "bad"; res.textContent = "Fehler: " + e.message;
   } finally {
