@@ -15,7 +15,7 @@ open points are listed below.
 | Purpose | ID | Payload | Notes |
 |---|---|---|---|
 | Heat on | 0x5D3 | `02 00` / `82 00` | bit 7 as the roof unit currently sends it; repeat every 500 ms until the roof unit echoes it, max about 10× |
-| Ventilate on | 0x5D3 | `04 00` / `84 00` | `04` worked in the `00` state; `84` was never adopted in the `8x` state |
+| Ventilate on | 0x5D3 | `04 00` / `84 00` | **never adopted over CAN** in either state (`04` in the dashboard at 22:28, `84` later); the heater ventilates only while our frame is on the bus |
 | Off | 0x5D3 | `00 00` / `80 00` | as heat on |
 | Heater status | 0x3E5 | 8 bytes | every 200 ms while the bus is awake, see layout |
 | Heater active echo | 0x3E3 | byte 4 `01`/`00` | about 40–120 ms after 0x3E5 |
@@ -147,8 +147,38 @@ value, then stop. The device stays in normal mode only for the burst.
 | `off_retry`, `tx_vent_bit7_10x` | 10× `84 00`, 500 ms, run-on | never; ventilation on for about 0.2–0.4 s per frame |
 | `off_retry`, `tx_vent_bit7_200ms` | 25× `84 00`, 200 ms, after run-on | never; ventilation toggles on/off every 200 ms |
 
-  In the morning (`00` state) `04 00` worked. In the `8x` state, ventilate-on over CAN failed
-  both during and after the water-pump run-on.
+  Correction: ventilate-on over CAN **never** worked, not even in the morning. The morning `04`
+  transitions in `roof_panel_actions*` came from the panel itself, and the dashboard `04` at
+  22:28 (state unknown, no capture) failed the same way. So bit 7 is probably **not** the
+  reason why vent is rejected.
+
+**Why heat is adopted and vent is not (hypothesis, 2026-11-23 analysis):**
+
+| 0x3E5 while our frames are on the bus | byte 1 | byte 7 | roof unit |
+|---|---|---|---|
+| heat (`82`) | `0A`/`0B`: **b1 control LED** + b3 water pump (+ b0) | `00` | adopts after 1–4 frames |
+| vent (`84`) | `09`: b0 vehicle blower + b3 water pump, **LED off** | `01` | never adopts |
+| vent started on the panel | `09` | `01` | panel already sends `84` |
+
+- The heater itself reacts correctly to our `84`. It sets the Climatic bits (blower and
+  ventilation active), so the heater→Climatic path works.
+- The roof unit follows a heater that reports itself active through the control LED bit, but
+  ventilation never sets that bit.
+- For starts not made on the panel (radio/Telestart), the forum layout gives 0x3E5 byte 0:
+  - b0: on via radio
+  - b3: explicit ventilation via radio
+  - b7: wake Komfort-CAN
+  
+  Each is sent 5× at the moment of switching. This is probably how the panel learns about an
+  external vent start.
+- Our spoof test (`3E5 89 00 00 40 …`) was **not** a valid test of this. The heater was off,
+  no `84` was on the bus, and byte 1 (`00`) and byte 7 (`00`) said "not ventilating", which
+  contradicts byte 0.
+- Next test:
+  1. Send `5D3 84`.
+  2. As soon as the heater reports ventilation, send 5× 0x3E5 with byte 0 = `09` (b0 + b3,
+     optionally + b7), byte 1 = `09`, byte 7 = `01`. Copy bytes 2–6 from the real frame.
+     Space the frames 100 ms apart, between the heater's own 200 ms frames.
 
 **Ventilation from the panel** (`panel_vent`): another ECU woke the bus (first frame 0x438).
 The roof unit sent `80`, then `84` 0.5 s later. 0x3E5 showed ventilation 0.17 s after that,
