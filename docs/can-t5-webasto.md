@@ -350,6 +350,9 @@ Research from 2026-11-23. Forum and Webasto sources are listed at the end of thi
 3. Check whether the roof unit then sends `84` by itself and shows the FERNBED. time.
 4. Variants:
    - explicit bits `09` (b0 + b3, used by `set_heater_mode(radio_emulation=True)`) or `05` (heat)
+   - `radio_impulse('on', vent_bits=True)`: byte 0 `89`, plus byte 1 b0 ("vehicle blower on", the
+     request to the Climatic) and byte 7 b0 ("ventilation active"). The frame then looks like a
+     heater that is really ventilating. The real heater sends these bits as 0 in between.
    - `radio_impulse('off')` with b1
    - 200 ms spacing vs a fast block
 5. Keep heater coding 18 unchanged at first, to avoid DTC 02245.

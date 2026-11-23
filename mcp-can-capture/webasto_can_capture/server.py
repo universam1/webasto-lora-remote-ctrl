@@ -844,7 +844,12 @@ class CanSniffer:
         return None
 
     def radio_impulse(
-        self, kind: str, wake_bit: bool = True, frames: int = 5, observe_s: float = IMPULSE_OBSERVE_S
+        self,
+        kind: str,
+        wake_bit: bool = True,
+        frames: int = 5,
+        observe_s: float = IMPULSE_OBSERVE_S,
+        vent_bits: bool = False,
     ) -> dict[str, Any]:
         """Emulate a VW radio remote (Telestart hand transmitter) ON or OFF impulse.
 
@@ -856,10 +861,18 @@ class CanSniffer:
         one neutral 0x5D3 equal to the panel's last value. Then the device returns to listen-only
         and the bus is observed for `observe_s` seconds.
 
+        `vent_bits` (only with kind="on", experimental): the spoofed frames additionally claim an
+        active ventilation, i.e. byte 0 b3 (explicit ventilation via radio), byte 1 b0 (vehicle
+        blower on, the heater's request to the Climatic) and byte 7 b0 (ventilation active), so
+        byte 0 becomes 0x89 with the wake bit. The real heater keeps reporting these bits as 0
+        every 200 ms in between.
+
         Needs enable_tx and enable_status_spoof, like set_heater_mode(radio_emulation=True).
         """
         if kind not in ("on", "off"):
             raise ValueError("kind must be 'on' or 'off'")
+        if vent_bits and kind != "on":
+            raise ValueError("vent_bits is only allowed with kind='on'")
         if not 1 <= frames <= 20:
             raise ValueError("frames must be 1..20")
         if not 0.5 <= observe_s <= 10:
@@ -876,7 +889,7 @@ class CanSniffer:
                 "call enable_status_spoof(confirm=true) first, only after the user explicitly approved it"
             )
 
-        b0 = (0x01 if kind == "on" else 0x02) | (RADIO_WAKE_BIT if wake_bit else 0)
+        b0 = (0x01 if kind == "on" else 0x02) | (RADIO_WAKE_BIT if wake_bit else 0) | (0x08 if vent_bits else 0)
         t0 = time.time()
         with self._lock:
             newest = self.ring[-1].host_time if self.ring else None
@@ -926,7 +939,11 @@ class CanSniffer:
                         if t_first_spoof is None:
                             heater_before = bytes(f.data)
                         ref, due = e.host_time, e.host_time + SPOOF_DELAY_S
-                        payload = bytes([b0]) + bytes(f.data[1:8])
+                        body = bytearray(f.data[1:8])  # bytes 1..7 of the real frame
+                        if vent_bits:
+                            body[0] |= 0x01  # byte 1 b0: vehicle blower on (request to Climatic)
+                            body[6] |= 0x01  # byte 7 b0: ventilation active
+                        payload = bytes([b0]) + bytes(body)
                 now = time.time()
                 if not real_seen and now > first_deadline:
                     break  # no heater 0x3E5: nothing to copy, no spoof
@@ -1018,6 +1035,7 @@ class CanSniffer:
         result: dict[str, Any] = {
             "ok": ok,
             "kind": kind,
+            "vent_bits": vent_bits,
             "panel_before": hx(panel_before),
             "panel_after": hx(panel_after),
             "panel_changed": panel_changed,
@@ -1359,7 +1377,9 @@ async def set_heater_mode(
 
 
 @mcp.tool()
-async def radio_impulse(kind: str, wake_bit: bool = True, frames: int = 5, observe_s: float = 3.0) -> str:
+async def radio_impulse(
+    kind: str, wake_bit: bool = True, frames: int = 5, observe_s: float = 3.0, vent_bits: bool = False
+) -> str:
     """Emulate a VW radio remote (Telestart hand transmitter) ON or OFF impulse by SPOOFING THE
     HEATER'S OWN STATUS FRAME 0x3E5. Needs explicit user approval: enable_tx(confirm=true) and
     enable_status_spoof(confirm=true) first, otherwise refused. kind: "on" or "off".
@@ -1374,11 +1394,22 @@ async def radio_impulse(kind: str, wake_bit: bool = True, frames: int = 5, obser
     `observe_s` s. Returns JSON: ok (panel changed its 0x5D3 on its own to a non-off mode for
     "on", to off for "off"), panel_before, panel_after, panel_changed, panel_changed_after_ms,
     heater_before/after (state) and *_raw, heater_changed_after_ms, spoof_frames_sent,
-    spoof_payload, wake_frame, timeline ([t_ms, id, dir, hex]), message."""
+    spoof_payload, wake_frame, timeline ([t_ms, id, dir, hex]), message.
+
+    vent_bits=true (kind "on" only, experimental): the spoofed frames also claim active
+    ventilation: byte 0 b3 (explicit ventilation via radio, byte 0 = 0x89 with wake bit), byte 1 b0
+    (vehicle blower on = the heater's request to the Climatic) and byte 7 b0 (ventilation active).
+    The real heater keeps sending these bits as 0 every 200 ms in between."""
 
     def work() -> str:
         return json.dumps(
-            sniffer.radio_impulse(kind.strip().lower(), wake_bit, max(1, min(frames, 20)), max(0.5, min(observe_s, 10.0)))
+            sniffer.radio_impulse(
+                kind.strip().lower(),
+                wake_bit,
+                max(1, min(frames, 20)),
+                max(0.5, min(observe_s, 10.0)),
+                vent_bits,
+            )
         )
 
     return await _run(work)

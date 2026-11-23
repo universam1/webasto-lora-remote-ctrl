@@ -44,7 +44,7 @@ Captures are written to `mcp-can-capture/captures/` (git-ignored). Override with
 | `send_frame(id, data_hex, extended=False, count=1, interval_ms=100)` | Transmit on can0. Refused unless the firmware reports `tx_allowed_by_firmware` **and** `enable_tx(confirm=true)` was called this session. Sent frames go into the active capture with `Dir=Tx`. |
 | `set_heater_mode(mode, max_frames=10, radio_emulation=False, radio_wake_bit=True, radio_frames=5)` | Switch the heater to `off`, `heat` or `vent` through the roof control unit (0x5D3) and verify it. Same TX gating as `send_frame`. Mirrors bit 7 (0x80) of the panel's current 0x5D3 byte (from a panel frame younger than 2 s, or after one wake frame on a sleeping bus, waiting up to 600 ms). Sends one frame per 500 ms with the device in normal mode for the whole sequence, and stops as soon as a panel 0x5D3 carries the target byte. After `max_frames` it reports `ok: false`, "not adopted by roof unit". Optionally confirms with 0x3E5 (heat: control LED, vent: byte 7 bit 0, off: both clear). Returns JSON with `ok`, `mode`, `target_byte`, `panel_before`, `panel_after`, `frames_sent`, `adopted_after_ms`, `heater_confirmed`, `message`, `radio_emulation` and `timeline` (`[t_ms, id, dir, hex]` for 0x5D3/0x3E5 from the first Tx, at most about 60 entries). See "Radio-start emulation" below for `radio_emulation`. |
 | `enable_status_spoof(confirm)` | Separate session arm for spoofing the heater's **own** status frame 0x3E5 (`radio_emulation`, `radio_impulse`), needed in addition to `enable_tx`. Only call with `confirm=true` after the user explicitly approved it. `enable_tx(false)` and `disconnect` disarm it too. Sends nothing by itself. |
-| `radio_impulse(kind, wake_bit=True, frames=5, observe_s=3)` | Emulate a VW radio remote ON/OFF impulse (`kind` = `on`/`off`) by spoofing 0x3E5 only, no 0x5D3. Needs `enable_tx` and `enable_status_spoof`. See below. |
+| `radio_impulse(kind, wake_bit=True, frames=5, observe_s=3, vent_bits=False)` | Emulate a VW radio remote ON/OFF impulse (`kind` = `on`/`off`) by spoofing 0x3E5 only, no 0x5D3. Needs `enable_tx` and `enable_status_spoof`. See below. |
 
 ## Radio-start emulation (experimental, spoofs 0x3E5)
 
@@ -68,6 +68,14 @@ called this session; only arm the latter after the user explicitly approved it.
 - keeps the 0x5D3 schedule in the same loop and stops 0x5D3 and spoofing at the panel echo.
 
 The result adds `spoof_frames_sent`, `spoof_payload` and `heater_confirmed_before_spoof`.
+
+`radio_impulse(kind, vent_bits=True)` (only for `on`, experimental) makes the spoofed frames also
+claim active ventilation:
+- byte 0 b3 = explicit ventilation via radio, so byte 0 = `89`
+- byte 1 b0 = vehicle blower on, the heater's request to the Climatic
+- byte 7 b0 = ventilation active
+
+The real heater keeps sending these bits as 0 every 200 ms in between.
 
 `radio_impulse(kind)` models the VW hand transmitter, which only sends an ON (or OFF) impulse;
 the roof unit picks mode and run time itself (menu FERNBED). It sends no 0x5D3 command, only

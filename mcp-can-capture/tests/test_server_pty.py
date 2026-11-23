@@ -640,6 +640,26 @@ def test_radio_impulse_on_switches_panel_to_remote_mode(panel_env):
     assert "5 Tx frames" in sn.stop_capture()
 
 
+def test_radio_impulse_vent_bits(panel_env):
+    heater = FakeHeater()
+    sn, dev = panel_env(FakePanel(byte=0x80, period_s=0.5, remote_mode="vent"), heater=heater)
+    _wait_panel(sn)
+    _real_sleep(0.3)
+    sn.enable_tx(True)
+    sn.enable_status_spoof(True)
+    with pytest.raises(ValueError):
+        sn.radio_impulse("off", vent_bits=True)
+    res = sn.radio_impulse("on", observe_s=1.0, vent_bits=True)
+    assert res["vent_bits"] is True and res["spoof_frames_sent"] >= 1
+    real_times = [t for t, _ in heater.sent]
+    for t, d in _tx_frames(dev, 0x3E5):
+        assert d[0] == 0x89  # on via radio + explicit ventilation + wake
+        real = heater.sent[max(k for k, rt in enumerate(real_times) if rt < t)][1]
+        assert d[1] == real[1] | 0x01 and d[7] == real[7] | 0x01  # blower + ventilation active
+        assert d[2:7] == real[2:7]  # fuel, power, coolant, pumps copied unchanged
+    _assert_listen_only(sn, dev)
+
+
 def test_radio_impulse_off(panel_env):
     panel = FakePanel(byte=0x84, period_s=0.5, remote_mode="vent")
     heater = FakeHeater(mode=0x04)
