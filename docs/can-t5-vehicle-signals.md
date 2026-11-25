@@ -71,6 +71,64 @@ Other IDs identified in our data:
   disturb the bus. Forum hint (unverified): cluster connector T32a pins 19/20, Komfort 8/9,
   Infotainment 15/16.
 
+## Board battery charging in overrun (user's plan)
+
+Facts from the user (2026-11-25):
+- The T5.2 has **no BlueMotion and no start-stop**. The alternator does **not** raise its
+  voltage in overrun; the user tested this.
+- Not a California. It has the factory heater and an additional board battery that is
+  charged through a separation relay.
+- Plan: the ESP32 takes over the relay and closes it only in overrun.
+
+What the research says about the relay (no source found for any of it being CAN controlled):
+- Retrofit and factory separation relays are driven by a control wire from D+, terminal 75X
+  or a control unit. Nothing proves that a CAN command can switch it.
+- `BatMan_1` (0x578) in the PQ DBC has relay and charge bits, but it looks like a status of
+  dual-battery PQ cars. It is not in our captures.
+- The battery monitoring unit (at the negative pole) hangs on LIN at the gateway; it is a
+  sensor, not a relay driver.
+- So the ESP32 has to intercept the **control line**, not send a CAN command.
+
+Expected gain (rough estimate, no measurement): 30 A at 14 V is about 420 W electric. With
+60 % alternator and 35 % diesel efficiency this is about 0.2 l/h of diesel, about
+0.25 l/100 km at 80 km/h, around 3 % of consumption. The gain comes only from moving the
+alternator load into fuel-cut phases, since the voltage is not raised.
+
+Requirements for the relay takeover:
+1. **Fail-safe:** the factory control signal runs through the NC contact of an ESP32-driven
+   relay, so a dead ESP32 gives the factory behaviour.
+2. The connection stays open when the engine is off and while cranking, as in the factory.
+3. **Minimum on-time and off-time** (for example 5–10 s) with hysteresis. Overrun phases are
+   short, and a discharged battery draws tens of amps on closing, so a chattering relay wears
+   out.
+4. Keep the factory fuse (about 80 A reported) and relay rating, or limit the current with a
+   DC-DC charger.
+5. Engine-running qualifier: RPM above idle, or `0x571` above about 13.5 V.
+6. Stop when the board battery is full. Measure its voltage with the ESP32 ADC at the pole.
+
+## Detecting overrun
+
+Overrun (fuel cut-off) is the one state that decides everything.
+
+| Method | Signals | Status |
+|---|---|---|
+| A. Antrieb-CAN, passive (500 kbit/s) | Motor_1 `0x280`: pedal byte 5 (0.4 %), idle flag byte 0 bit 0, indicated torque byte 1, driver torque request byte 7, clutch switch byte 0 bit 3; RPM bytes 2–3 × 0.25. Motor_2 `0x288` bit 16: brake light switch | In the DBC. Not seen at the radio. Needs a tap on an airbag-relevant bus. |
+| B. Komfort-CAN, derived | speed (`0x351`/`0x320` candidates), RPM (`0x353` candidate), brake light in `0x470`? | IDs not found yet. Deceleration alone is **not** proof: uphill with the pedal pressed also slows the car. |
+| C. OBD-II PIDs | fuel rate `0x5E`, engine load `0x04` | A T5 from 12/2013 gave almost no data through an ELM327. Active requests on the diagnostic CAN. |
+| D. Own sensor | pedal sensor tap, accelerometer | Hardware work on the engine wiring. |
+
+Proposed rule for B (hypothesis, to be validated, **not tested**):
+speed above 20 km/h, RPM above idle + 300, RPM/speed matching a gear ratio within 5 %
+(clutch engaged), deceleration below −0.3 m/s², and no accelerator information to the
+contrary. A false positive only costs a little fuel and is no safety problem, because the
+factory behaviour is "always connected when the engine runs".
+
+Approach: take the Komfort-CAN drive test first. If it shows speed and RPM there, check how
+well the rule B holds. If pedal or idle information is missing and rule B is too unreliable,
+tap the Antrieb-CAN with a **second** sniffer (ESP32 + SN65HVD230, listen-only). Record both
+buses in the same drive with a `mark_event` at the same moments. Pedal, idle flag and
+torque from the Antrieb-CAN are then the ground truth for rule B.
+
 ## Protocol for the next session (drive test)
 
 Write down, for every step: time, outside temperature (cluster), odometer, fuel level,
