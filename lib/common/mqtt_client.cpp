@@ -5,9 +5,18 @@
 
 #ifdef ENABLE_MQTT_CONTROL
 
+#include "mqtt_discovery.h"
+
 #ifdef MQTT_ENABLE_OTA
 #include "ota_updater.h"
 #endif
+
+namespace {
+constexpr uint16_t kBufferSize = 1280;
+constexpr uint32_t kBackoffMinMs = 1000;
+constexpr uint32_t kBackoffMaxMs = 30000;
+constexpr uint32_t kDiscoveryRetryMs = 5000;
+}  // namespace
 
 MQTTClient* MQTTClient::instance_ = nullptr;
 
@@ -19,10 +28,15 @@ MQTTClient::MQTTClient(WiFiManager& wifiMgr)
     clientId_(nullptr),
     username_(nullptr),
     password_(nullptr),
-    lastReconnectMs_(0),
-    reconnectIntervalMs_(5000),
+    nextAttemptMs_(0),
+    backoffMs_(kBackoffMinMs),
     discoveryPublished_(false),
-    cmdCallback_(nullptr)
+    discoveryRetryMs_(0),
+    rememberedPending_(false),
+    epoch_(0),
+    tagCounter_(0),
+    cmdCallback_(nullptr),
+    rtCallback_(nullptr)
 #ifdef MQTT_ENABLE_OTA
     , otaUpdater_(nullptr)
 #endif
@@ -40,17 +54,22 @@ void MQTTClient::begin(const char* broker, uint16_t port, const char* clientId,
   password_ = password;
 
   mqtt_.setServer(broker_, port_);
-  mqtt_.setBufferSize(1024);  // Increase from default 256 bytes for discovery messages
+  mqtt_.setBufferSize(kBufferSize);  // discovery payloads and the JSON state
   mqtt_.setKeepAlive(60);
-  mqtt_.setSocketTimeout(5);  // 5 second socket timeout
+  mqtt_.setSocketTimeout(2);  // a connect attempt blocks the net task at most ~2 s
 
   Serial.println("[MQTT] Client initialized");
-  Serial.printf("[MQTT] Broker: %s:%d, Client ID: %s\n", broker_, port_, clientId_);
-  Serial.println("[MQTT] Buffer size: 1024 bytes");
+  Serial.printf("[MQTT] Broker: %s:%d, Client ID: %s, buffer %u bytes\n", broker_, port_, clientId_,
+                (unsigned)kBufferSize);
 }
 
-void MQTTClient::setCommandCallback(MQTTCommandCallback callback) {
-  cmdCallback_ = callback;
+void MQTTClient::setCommandCallback(MQTTCommandCallback callback) { cmdCallback_ = callback; }
+void MQTTClient::setRtCommandCallback(MQTTRtCommandCallback callback) { rtCallback_ = callback; }
+
+void MQTTClient::setSystemView(const wh::SystemSnapshot& snap) {
+  defaults_.targetC = snap.climateTargetC;
+  defaults_.durationMin = snap.climateDurationMin;
+  defaults_.climateActive = snap.climateActive;
 }
 
 #ifdef MQTT_ENABLE_OTA
@@ -61,648 +80,294 @@ void MQTTClient::setOTAUpdater(OTAUpdater* otaUpdater) {
 #endif
 
 void MQTTClient::update() {
-  // Don't do anything if WiFi is not connected
   if (!wifiMgr_.isConnected()) {
-    if (mqtt_.connected()) {
-      mqtt_.disconnect();
-      discoveryPublished_ = false;
-    }
+    if (mqtt_.connected()) mqtt_.disconnect();
+    discoveryPublished_ = false;
     return;
   }
 
-  // Try to connect/reconnect to MQTT broker
+  const uint32_t now = millis();
+
   if (!mqtt_.connected()) {
-    const uint32_t now = millis();
-    if (now - lastReconnectMs_ > reconnectIntervalMs_) {
-      tryConnect();
-      lastReconnectMs_ = now;
+    discoveryPublished_ = false;
+    if ((int32_t)(now - nextAttemptMs_) >= 0) {
+      tryConnect();  // may block up to the socket timeout
+      if (mqtt_.connected()) {
+        backoffMs_ = kBackoffMinMs;
+      } else {
+        nextAttemptMs_ = millis() + backoffMs_;  // 1 s, 2 s, 4 s ... 30 s
+        backoffMs_ = backoffMs_ * 2 > kBackoffMaxMs ? kBackoffMaxMs : backoffMs_ * 2;
+      }
     }
     return;
   }
 
-  // Process incoming messages (non-blocking)
   mqtt_.loop();
 
-  // Publish discovery message if not yet done
-  if (!discoveryPublished_) {
+  if (!discoveryPublished_ && (int32_t)(now - discoveryRetryMs_) >= 0) {
     if (publishDiscovery()) {
-      #ifdef MQTT_ENABLE_DIAGNOSTIC_SENSORS
-      publishDiagnosticDiscovery();  // Phase 6: Also publish diagnostic sensors
-      #endif
       discoveryPublished_ = true;
-      publishAvailability(true);  // Announce we're online
+      publishAvailability(true);
+    } else {
+      discoveryRetryMs_ = now + kDiscoveryRetryMs;
     }
   }
 }
 
 void MQTTClient::tryConnect() {
-  Serial.println("[MQTT] Connecting to broker...");
-  Serial.printf("[MQTT] Broker: %s:%d\n", broker_, port_);
-  Serial.printf("[MQTT] Client ID: %s\n", clientId_);
-  Serial.printf("[MQTT] Username: %s\n", username_ && strlen(username_) > 0 ? username_ : "(none)");
+  Serial.printf("[MQTT] Connecting to %s:%d as %s (user %s)\n", broker_, port_, clientId_,
+                username_ && strlen(username_) > 0 ? username_ : "(none)");
 
-  // Set Last Will and Testament (LWT) - announce offline on disconnect
-  String lwTopic = getAvailabilityTopic();
-  Serial.printf("[MQTT] LWT topic: %s\n", lwTopic.c_str());
-  
   bool connected = false;
   if (username_ && strlen(username_) > 0) {
-    connected = mqtt_.connect(clientId_, username_, password_,
-                              lwTopic.c_str(), 1, true, "offline");
+    connected = mqtt_.connect(clientId_, username_, password_, MQTT_T_AVAILABILITY, 1, true, "offline");
   } else {
-    connected = mqtt_.connect(clientId_, 
-                              lwTopic.c_str(), 1, true, "offline");
+    connected = mqtt_.connect(clientId_, MQTT_T_AVAILABILITY, 1, true, "offline");
   }
 
   if (connected) {
-    Serial.println("[MQTT] Connected to broker!");
+    Serial.println("[MQTT] Connected to broker");
     subscribe();
-    discoveryPublished_ = false;  // Trigger republish on reconnect
+    discoveryPublished_ = false;  // republish discovery on every (re)connect
+    discoveryRetryMs_ = 0;
+    epoch_++;
   } else {
-    int state = mqtt_.state();
-    Serial.printf("[MQTT] Connection failed, rc=%d\n", state);
-    // Detailed error codes
-    switch(state) {
-      case -4: Serial.println("[MQTT] Error: MQTT_CONNECTION_TIMEOUT"); break;
-      case -3: Serial.println("[MQTT] Error: MQTT_CONNECTION_LOST"); break;
-      case -2: Serial.println("[MQTT] Error: MQTT_CONNECT_FAILED"); break;
-      case -1: Serial.println("[MQTT] Error: MQTT_DISCONNECTED"); break;
-      case 1: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_PROTOCOL"); break;
-      case 2: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_CLIENT_ID"); break;
-      case 3: Serial.println("[MQTT] Error: MQTT_CONNECT_UNAVAILABLE"); break;
-      case 4: Serial.println("[MQTT] Error: MQTT_CONNECT_BAD_CREDENTIALS"); break;
-      case 5: Serial.println("[MQTT] Error: MQTT_CONNECT_UNAUTHORIZED"); break;
-    }
+    Serial.printf("[MQTT] Connection failed, rc=%d, retry in %lu ms\n", mqtt_.state(),
+                  (unsigned long)backoffMs_);
   }
 }
 
 void MQTTClient::subscribe() {
-  String modeTopic = getModeCmdTopic();
-  String minutesTopic = getMinutesCmdTopic();
-  String queryTopic = getQueryTopic();
-
-  if (mqtt_.subscribe(modeTopic.c_str())) {
-    Serial.printf("[MQTT] Subscribed to: %s\n", modeTopic.c_str());
+  static const char* const kTopics[] = {
+    MQTT_T_MODE_SET, MQTT_T_MINUTES_SET, MQTT_T_QUERY,
+    MQTT_T_TARGET_SET, MQTT_T_DURATION_SET, MQTT_T_ENABLE_SET,
+#ifdef MQTT_ENABLE_OTA
+    OTA_UPDATE_TOPIC,
+#endif
+  };
+  for (const char* t : kTopics) {
+    if (mqtt_.subscribe(t)) Serial.printf("[MQTT] Subscribed to: %s\n", t);
   }
-
-  if (mqtt_.subscribe(minutesTopic.c_str())) {
-    Serial.printf("[MQTT] Subscribed to: %s\n", minutesTopic.c_str());
-  }
-  
-  if (mqtt_.subscribe(queryTopic.c_str())) {
-    Serial.printf("[MQTT] Subscribed to: %s\n", queryTopic.c_str());
-  }
-  
-  #ifdef MQTT_ENABLE_OTA
-  // Subscribe to OTA update topic (Phase 7)
-  if (mqtt_.subscribe(OTA_UPDATE_TOPIC)) {
-    Serial.printf("[MQTT] Subscribed to OTA topic: %s\n", OTA_UPDATE_TOPIC);
-  }
-  #endif
 }
 
 bool MQTTClient::isConnected() const {
   return const_cast<PubSubClient&>(mqtt_).connected();
 }
 
+// ---- publishing -------------------------------------------------------------------------
+
 bool MQTTClient::publishState(const char* mode) {
-  if (!mqtt_.connected()) return false;
-  
-  String topic = getModeStateTopic();
-  bool result = mqtt_.publish(topic.c_str(), mode, true);  // Retained
-  
-  if (result) {
-    Serial.printf("[MQTT] Published state: %s\n", mode);
-  }
-  
-  return result;
+  return mqtt_.connected() && mqtt_.publish(MQTT_T_MODE_STATE, mode, true);
 }
 
-bool MQTTClient::publishTemperature(int16_t tempC) {
+bool MQTTClient::publishTemperatureDC(int16_t dC) {
   if (!mqtt_.connected()) return false;
-  
-  String topic = getTempStateTopic();
-  char payload[16];
-  snprintf(payload, sizeof(payload), "%d", tempC);
-  
-  return mqtt_.publish(topic.c_str(), payload, true);  // Retained
+  char p[16];
+  mqttc::fmtDC(p, sizeof p, dC);
+  return mqtt_.publish(MQTT_T_TEMP_STATE, p, true);
 }
 
 bool MQTTClient::publishVoltage(uint16_t voltageMv) {
   if (!mqtt_.connected()) return false;
-  
-  String topic = getVoltageStateTopic();
-  char payload[16];
-  snprintf(payload, sizeof(payload), "%.2f", voltageMv / 1000.0f);
-  
-  return mqtt_.publish(topic.c_str(), payload, true);  // Retained
+  char p[16];
+  mqttc::fmtMilli2(p, sizeof p, voltageMv);
+  return mqtt_.publish(MQTT_T_VOLTAGE_STATE, p, true);
 }
 
 bool MQTTClient::publishPower(uint16_t power) {
   if (!mqtt_.connected()) return false;
-  
-  String topic = getPowerStateTopic();
-  char payload[16];
-  snprintf(payload, sizeof(payload), "%u", power);
-  
-  return mqtt_.publish(topic.c_str(), payload, true);  // Retained
+  char p[16];
+  snprintf(p, sizeof p, "%u", power);
+  return mqtt_.publish(MQTT_T_POWER_STATE, p, true);
 }
 
 bool MQTTClient::publishAvailability(bool available) {
   if (!mqtt_.connected()) return false;
-  
-  String topic = getAvailabilityTopic();
-  const char* payload = available ? "online" : "offline";
-  
-  bool result = mqtt_.publish(topic.c_str(), payload, true);  // Retained
-  
-  if (result) {
-    Serial.printf("[MQTT] Published availability: %s\n", payload);
-  }
-  
-  return result;
+  return mqtt_.publish(MQTT_T_AVAILABILITY, available ? "online" : "offline", true);
 }
 
-bool MQTTClient::publishStatus(const proto::StatusPayload& status) {
+bool MQTTClient::publishSnapshot(const wh::SystemSnapshot& snap, const char* stateJson) {
   if (!mqtt_.connected()) return false;
+  const bool ok = mqtt_.publish(MQTT_T_STATE, stateJson, false);
 
-  // Publish mode
-  const char* mode = (status.state == proto::HeaterState::Running) ? "heat" : "off";
-  publishState(mode);
+  // Legacy topics, fed from the same snapshot.
+  publishState(snap.heater.phase == wh::HeaterPhase::Heating ? "heat" : "off");
+  const int16_t t = mqttc::currentTempDC(snap);
+  if (t != wh::kUnknownDC) publishTemperatureDC(t);
+  if (snap.heater.voltage_mV.seen && snap.heater.voltage_mV.v > 0) publishVoltage(snap.heater.voltage_mV.v);
+  if (snap.heater.statusAtMs != 0) publishPower(wh::heatingPowerW(snap.heater.powerRaw));
+  return ok;
+}
 
-  // Publish sensors
-  if (status.temperatureC != INT16_MIN) {
-    publishTemperature(status.temperatureC);
+bool MQTTClient::publishCommandResult(rt::Source src, uint8_t result, uint8_t tag) {
+  if (!mqtt_.connected()) return false;
+  char buf[96];
+  if (mqttc::buildLastCmdJson(src, result, tag, buf, sizeof buf) == 0) return false;
+  return mqtt_.publish(MQTT_T_LAST_CMD, buf, false);
+}
+
+bool MQTTClient::publishLoRaRSSI(int rssi) {
+  if (!mqtt_.connected()) return false;
+  char p[16];
+  snprintf(p, sizeof p, "%d", rssi);
+  return mqtt_.publish(MQTT_T_LORA_RSSI, p, true);
+}
+
+bool MQTTClient::publishLoRaSNR(float snr) {
+  if (!mqtt_.connected()) return false;
+  char p[16];
+  snprintf(p, sizeof p, "%.2f", snr);
+  return mqtt_.publish(MQTT_T_LORA_SNR, p, true);
+}
+
+bool MQTTClient::publishLastCommandSource(const char* source) {
+  return mqtt_.connected() && mqtt_.publish(MQTT_T_LAST_CMD_SOURCE, source, true);
+}
+
+bool MQTTClient::publishWBusHealth(bool healthy, const char* details) {
+  if (!mqtt_.connected()) return false;
+  JsonDocument doc;
+  doc["status"] = healthy ? "healthy" : "unhealthy";
+  if (details && strlen(details) > 0) doc["details"] = details;
+  char buf[128];
+  if (serializeJson(doc, buf, sizeof buf) >= sizeof buf - 1) return false;
+  const bool a = mqtt_.publish(MQTT_T_WBUS_HEALTH, buf, true);
+  const bool b = mqtt_.publish(MQTT_T_BUS_HEALTH_ALIAS, buf, true);
+  return a && b;
+}
+
+bool MQTTClient::publishDiagnostics(int loraRssi, float loraSNR, const char* cmdSource,
+                                    bool transportHealthy, const char* healthDetails) {
+  bool success = true;
+  success &= publishLoRaRSSI(loraRssi);
+  success &= publishLoRaSNR(loraSNR);
+  success &= publishLastCommandSource(cmdSource);
+  success &= publishWBusHealth(transportHealthy, healthDetails);
+  return success;
+}
+
+// ---- discovery --------------------------------------------------------------------------
+
+bool MQTTClient::emitDiscovery(void* ctx, const char* topic, const char* payload) {
+  MQTTClient* self = static_cast<MQTTClient*>(ctx);
+  if (!self->mqtt_.publish(topic, payload, true)) {
+    Serial.printf("[MQTT] Discovery publish failed (%u bytes): %s\n", (unsigned)strlen(payload), topic);
+    return false;
   }
-
-  if (status.voltage_mV > 0) {
-    publishVoltage(status.voltage_mV);
-  }
-
-  if (status.power > 0) {
-    publishPower(status.power);
-  }
-
   return true;
 }
 
 bool MQTTClient::publishDiscovery() {
   if (!mqtt_.connected()) return false;
-
-  Serial.println("[MQTT] Publishing HomeAssistant discovery...");
-
-  JsonDocument doc;
-  
-  // Device info
-  JsonObject device = doc["device"].to<JsonObject>();
-  device["identifiers"].add(MQTT_CLIENT_ID);
-  device["name"] = "Webasto ThermoTop C";
-  device["manufacturer"] = "Custom";
-  device["model"] = "TTGO LoRa32 + W-BUS";
-  device["sw_version"] = "1.0.0";
-
-  // Origin info
-  JsonObject origin = doc["origin"].to<JsonObject>();
-  origin["name"] = "Webasto LoRa Controller";
-  origin["sw"] = "1.0.0";
-  origin["url"] = "https://github.com/yourusername/webastolora";
-
-  // Climate entity configuration
-  doc["name"] = "Webasto Heater";
-  doc["unique_id"] = "webasto_ttgo_receiver";
-  doc["modes"].add("off");
-  doc["modes"].add("heat");
-  
-  doc["mode_command_topic"] = getModeCmdTopic();
-  doc["mode_state_topic"] = getModeStateTopic();
-  
-  doc["temperature_command_topic"] = getMinutesCmdTopic();
-  doc["current_temperature_topic"] = getTempStateTopic();
-  
-  doc["min_temp"] = 10;
-  doc["max_temp"] = 90;
-  doc["temp_step"] = 10;
-  doc["temperature_unit"] = "C";
-  
-  doc["availability_topic"] = getAvailabilityTopic();
-  doc["payload_available"] = "online";
-  doc["payload_not_available"] = "offline";
-
-  // Serialize and publish
-  String payload;
-  serializeJson(doc, payload);
-  
-  Serial.printf("[MQTT] Discovery payload size: %d bytes\n", payload.length());
-  
-  String topic = getDiscoveryTopic();
-  Serial.printf("[MQTT] Discovery topic: %s\n", topic.c_str());
-  
-  bool result = mqtt_.publish(topic.c_str(), payload.c_str(), true);  // Retained
-  
-  if (result) {
-    Serial.println("[MQTT] Discovery published successfully");
-  } else {
-    Serial.printf("[MQTT] Discovery publish failed (payload: %d bytes, buffer: 1024 bytes)\n", payload.length());
-  }
-
-  return result;
+#ifdef MQTT_ENABLE_DIAGNOSTIC_SENSORS
+  const bool diag = true;
+#else
+  const bool diag = false;
+#endif
+  const bool ok = mqttd::publishAllDiscovery(&MQTTClient::emitDiscovery, this, diag);
+  Serial.println(ok ? "[MQTT] Discovery published" : "[MQTT] Discovery incomplete");
+  return ok;
 }
+
+// ---- incoming commands ------------------------------------------------------------------
 
 void MQTTClient::messageCallback(char* topic, byte* payload, unsigned int length) {
-  if (instance_) {
-    instance_->handleMessage(topic, payload, length);
-  }
+  if (instance_) instance_->handleMessage(topic, payload, length);
 }
 
-void MQTTClient::handleMessage(const char* topic, const byte* payload, 
-                                unsigned int length) {
-  Serial.printf("[MQTT] Message received on topic: %s\n", topic);
-  
-  // Create null-terminated payload string
-  char payloadStr[length + 1];
-  memcpy(payloadStr, payload, length);
-  payloadStr[length] = '\0';
-  
-  Serial.printf("[MQTT] Payload: %s\n", payloadStr);
-
-  String topicStr(topic);
-  String modeCmdTopic = getModeCmdTopic();
-  String minutesCmdTopic = getMinutesCmdTopic();
-  String queryTopic = getQueryTopic();
-  
-  #ifdef MQTT_ENABLE_OTA
-  // Handle OTA update messages (Phase 7)
-  if (topicStr == OTA_UPDATE_TOPIC) {
+void MQTTClient::handleMessage(const char* topic, const byte* payload, unsigned int length) {
+#ifdef MQTT_ENABLE_OTA
+  if (strcmp(topic, OTA_UPDATE_TOPIC) == 0) {
     Serial.println("[MQTT] OTA update command received");
-    
     if (otaUpdater_) {
-      // Parse JSON payload: {"url": "http://...", "username": "...", "password": "..."}
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload, length);
-      
       if (!error) {
         const char* url = doc["url"] | "";
         if (strlen(url) > 0) {
-          Serial.printf("[MQTT] OTA URL: %s\n", url);
           otaUpdater_->requestUpdate(url);
           publishOTAStatus("requested", "OTA update requested");
         } else {
-          Serial.println("[MQTT] ERROR: No URL in OTA message");
           publishOTAStatus("error", "No URL provided");
         }
       } else {
-        Serial.println("[MQTT] ERROR: Failed to parse OTA JSON");
         publishOTAStatus("error", "Invalid JSON payload");
       }
     } else {
-      Serial.println("[MQTT] ERROR: OTA updater not registered");
       publishOTAStatus("error", "OTA updater not initialized");
     }
     return;
   }
-  #endif
+#endif
 
-  MQTTCommand cmd;
+  char payloadStr[64];
+  const unsigned int n = length < sizeof(payloadStr) - 1 ? length : sizeof(payloadStr) - 1;
+  memcpy(payloadStr, payload, n);
+  payloadStr[n] = '\0';
+  Serial.printf("[MQTT] %s = %s\n", topic, payloadStr);
 
-  if (topicStr == modeCmdTopic) {
-    // Mode command: "off" or "heat"
-    if (strcmp(payloadStr, "off") == 0) {
-      cmd.type = MQTTCommand::STOP;
-      cmd.timestampSec = time(nullptr);  // Current time
-    } else if (strcmp(payloadStr, "heat") == 0) {
-      cmd.type = MQTTCommand::START;
-      cmd.minutes = 30;  // Default runtime
-      cmd.timestampSec = time(nullptr);
-    } else {
-      Serial.printf("[MQTT] Unknown mode: %s\n", payloadStr);
-      return;
-    }
-  } else if (topicStr == minutesCmdTopic) {
-    // Minutes command: integer value
-    int minutes = atoi(payloadStr);
-    if (minutes < 10 || minutes > 90) {
-      Serial.printf("[MQTT] Invalid minutes: %d\n", minutes);
-      return;
-    }
-    
-    cmd.type = MQTTCommand::RUN_MINUTES;
-    cmd.minutes = (uint8_t)minutes;
-    cmd.timestampSec = time(nullptr);
-  } else if (topicStr == queryTopic) {
-    // Query status command: triggers W-BUS polling without starting heater
-    Serial.println("[MQTT] Query status command received");
-    cmd.type = MQTTCommand::QUERY_STATUS;
-    cmd.timestampSec = time(nullptr);
-  } else {
+  struct Route { const char* topic; mqttc::CmdTopic id; };
+  static const Route kRoutes[] = {
+    {MQTT_T_MODE_SET, mqttc::CmdTopic::Mode},
+    {MQTT_T_MINUTES_SET, mqttc::CmdTopic::Minutes},
+    {MQTT_T_QUERY, mqttc::CmdTopic::Query},
+    {MQTT_T_TARGET_SET, mqttc::CmdTopic::ClimateTarget},
+    {MQTT_T_DURATION_SET, mqttc::CmdTopic::ClimateDuration},
+    {MQTT_T_ENABLE_SET, mqttc::CmdTopic::ClimateEnable},
+  };
+  const Route* route = nullptr;
+  for (const Route& r : kRoutes) {
+    if (strcmp(topic, r.topic) == 0) { route = &r; break; }
+  }
+  if (!route) {
     Serial.println("[MQTT] Unknown topic");
     return;
   }
 
-  // Validate command freshness
-  if (!isCommandFresh(cmd.timestampSec)) {
-    Serial.println("[MQTT] Command rejected: too old");
+  rt::Command cmd;
+  const auto res = mapper_.map(route->id, payloadStr, defaults_, ++tagCounter_, cmd);
+  if (res == mqttc::CommandMapper::Out::Ignored) {
+    Serial.println("[MQTT] Invalid payload ignored");
+    return;
+  }
+  if (res == mqttc::CommandMapper::Out::Remembered) {
+    Serial.printf("[MQTT] Climate duration stored: %u min\n",
+                  (unsigned)mapper_.effectiveDuration(defaults_));
+    rememberedPending_ = true;
     return;
   }
 
-  // Execute callback
+  if (rtCallback_) rtCallback_(cmd);
+
   if (cmdCallback_) {
-    Serial.println("[MQTT] Executing command callback");
-    cmdCallback_(cmd);
-  }
-}
-
-bool MQTTClient::parseCommand(const char* payload, unsigned int length, 
-                               MQTTCommand& cmd) {
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload, length);
-
-  if (error) {
-    Serial.printf("[MQTT] JSON parse error: %s\n", error.c_str());
-    return false;
-  }
-
-  // Parse command type
-  const char* cmdType = doc["command"];
-  if (!cmdType) {
-    Serial.println("[MQTT] Missing 'command' field");
-    return false;
-  }
-
-  if (strcmp(cmdType, "start") == 0) {
-    cmd.type = MQTTCommand::START;
-  } else if (strcmp(cmdType, "stop") == 0) {
-    cmd.type = MQTTCommand::STOP;
-  } else if (strcmp(cmdType, "run") == 0) {
-    cmd.type = MQTTCommand::RUN_MINUTES;
-  } else {
-    Serial.printf("[MQTT] Unknown command type: %s\n", cmdType);
-    return false;
-  }
-
-  // Parse minutes (optional for stop)
-  if (cmd.type != MQTTCommand::STOP) {
-    cmd.minutes = doc["minutes"] | 30;  // Default 30 minutes
-  }
-
-  // Parse timestamp
-  cmd.timestampSec = doc["timestamp"] | 0;
-
-  return true;
-}
-
-bool MQTTClient::isCommandFresh(uint32_t timestampSec) {
-  if (timestampSec == 0) {
-    // No timestamp provided, assume fresh
-    return true;
-  }
-
-  uint32_t currentTimeSec = time(nullptr);
-  if (currentTimeSec < 1000000000) {
-    // Time not synced yet, assume fresh
-    Serial.println("[MQTT] Warning: System time not synced, accepting command");
-    return true;
-  }
-
-  uint32_t ageSec = currentTimeSec - timestampSec;
-  if (ageSec > MQTT_CMD_MAX_AGE_SEC) {
-    Serial.printf("[MQTT] Command too old: %lu seconds\n", ageSec);
-    return false;
-  }
-
-  return true;
-}
-
-// Topic helper methods
-String MQTTClient::getModeCmdTopic() {
-  return String(MQTT_TOPIC_BASE) + "/mode/set";
-}
-
-String MQTTClient::getModeStateTopic() {
-  return String(MQTT_TOPIC_BASE) + "/mode/state";
-}
-
-String MQTTClient::getMinutesCmdTopic() {
-  return String(MQTT_TOPIC_BASE) + "/minutes/set";
-}
-
-String MQTTClient::getQueryTopic() {
-  return String(MQTT_TOPIC_BASE) + "/query";
-}
-
-String MQTTClient::getTempStateTopic() {
-  return String(MQTT_TOPIC_BASE) + "/temperature/state";
-}
-
-String MQTTClient::getVoltageStateTopic() {
-  return String(MQTT_TOPIC_BASE) + "/voltage/state";
-}
-
-String MQTTClient::getPowerStateTopic() {
-  return String(MQTT_TOPIC_BASE) + "/power/state";
-}
-
-String MQTTClient::getAvailabilityTopic() {
-  return String(MQTT_TOPIC_BASE) + "/availability";
-}
-
-String MQTTClient::getDiscoveryTopic() {
-  return String(MQTT_DISCOVERY_PREFIX) + "/climate/" + 
-         String(MQTT_CLIENT_ID) + "/config";
-}
-
-// ============================================================================
-// Phase 6: Diagnostic Sensor Publishing
-// ============================================================================
-
-bool MQTTClient::publishLoRaRSSI(int rssi) {
-  if (!mqtt_.connected()) return false;
-  String topic = getLoRaRSSITopic();
-  return mqtt_.publish(topic.c_str(), String(rssi).c_str(), true);
-}
-
-bool MQTTClient::publishLoRaSNR(float snr) {
-  if (!mqtt_.connected()) return false;
-  String topic = getLoRaSNRTopic();
-  char buffer[16];
-  snprintf(buffer, sizeof(buffer), "%.2f", snr);
-  return mqtt_.publish(topic.c_str(), buffer, true);
-}
-
-bool MQTTClient::publishLastCommandSource(const char* source) {
-  if (!mqtt_.connected()) return false;
-  String topic = getLastCmdSourceTopic();
-  return mqtt_.publish(topic.c_str(), source, true);
-}
-
-bool MQTTClient::publishWBusHealth(bool healthy, const char* details) {
-  if (!mqtt_.connected()) return false;
-  
-  // Publish as JSON with status and optional details
-  JsonDocument doc;
-  doc["status"] = healthy ? "healthy" : "unhealthy";
-  if (details && strlen(details) > 0) {
-    doc["details"] = details;
-  }
-  
-  String payload;
-  serializeJson(doc, payload);
-  
-  String topic = getWBusHealthTopic();
-  return mqtt_.publish(topic.c_str(), payload.c_str(), true);
-}
-
-bool MQTTClient::publishDiagnostics(int loraRssi, float loraSNR, 
-                                     const char* cmdSource, bool wbusHealthy) {
-  // Publish all diagnostic sensors at once
-  bool success = true;
-  success &= publishLoRaRSSI(loraRssi);
-  success &= publishLoRaSNR(loraSNR);
-  success &= publishLastCommandSource(cmdSource);
-  success &= publishWBusHealth(wbusHealthy);
-  return success;
-}
-
-String MQTTClient::getLoRaRSSITopic() {
-  return String(MQTT_TOPIC_BASE) + "/lora_rssi/state";
-}
-
-String MQTTClient::getLoRaSNRTopic() {
-  return String(MQTT_TOPIC_BASE) + "/lora_snr/state";
-}
-
-String MQTTClient::getLastCmdSourceTopic() {
-  return String(MQTT_TOPIC_BASE) + "/last_cmd_source/state";
-}
-
-String MQTTClient::getWBusHealthTopic() {
-  return String(MQTT_TOPIC_BASE) + "/wbus_health/state";
-}
-
-// ============================================================================
-// Phase 6: Diagnostic Sensor Discovery (HomeAssistant)
-// ============================================================================
-
-bool MQTTClient::publishDiagnosticDiscovery() {
-  if (!mqtt_.connected()) return false;
-  
-  // Device info (shared across all entities)
-  JsonDocument deviceDoc;
-  JsonArray identifiers = deviceDoc["identifiers"].to<JsonArray>();
-  identifiers.add(MQTT_CLIENT_ID);
-  deviceDoc["name"] = "Webasto ThermoTop C";
-  deviceDoc["manufacturer"] = "Custom";
-  deviceDoc["model"] = "TTGO LoRa32 + W-BUS";
-  deviceDoc["sw_version"] = "1.0.0";
-  
-  // 1. LoRa RSSI sensor
-  {
-    JsonDocument doc;
-    doc["name"] = "LoRa RSSI";
-    doc["unique_id"] = String(MQTT_CLIENT_ID) + "_lora_rssi";
-    doc["state_topic"] = getLoRaRSSITopic();
-    doc["device_class"] = "signal_strength";
-    doc["unit_of_measurement"] = "dBm";
-    doc["availability_topic"] = getAvailabilityTopic();
-    doc["device"] = deviceDoc;
-    
-    String payload;
-    serializeJson(doc, payload);
-    String topic = String(MQTT_DISCOVERY_PREFIX) + "/sensor/" + 
-                   String(MQTT_CLIENT_ID) + "_lora_rssi/config";
-    if (!mqtt_.publish(topic.c_str(), payload.c_str(), true)) {
-      Serial.println("[MQTT] Failed to publish LoRa RSSI discovery");
-      return false;
+    MQTTCommand legacy;
+    switch (cmd.type) {
+      case rt::CmdType::Heat:
+        legacy.type = route->id == mqttc::CmdTopic::Minutes ? MQTTCommand::RUN_MINUTES : MQTTCommand::START;
+        break;
+      case rt::CmdType::Stop: legacy.type = MQTTCommand::STOP; break;
+      case rt::CmdType::Query: legacy.type = MQTTCommand::QUERY_STATUS; break;
+      case rt::CmdType::ClimateSet: legacy.type = MQTTCommand::CLIMATE_SET; break;
+      case rt::CmdType::ClimateOff: legacy.type = MQTTCommand::CLIMATE_OFF; break;
     }
+    legacy.minutes = cmd.minutes;
+    legacy.targetC = cmd.targetC;
+    legacy.timestampSec = (uint32_t)time(nullptr);
+    cmdCallback_(legacy);
   }
-  
-  // 2. LoRa SNR sensor
-  {
-    JsonDocument doc;
-    doc["name"] = "LoRa SNR";
-    doc["unique_id"] = String(MQTT_CLIENT_ID) + "_lora_snr";
-    doc["state_topic"] = getLoRaSNRTopic();
-    doc["unit_of_measurement"] = "dB";
-    doc["availability_topic"] = getAvailabilityTopic();
-    doc["device"] = deviceDoc;
-    
-    String payload;
-    serializeJson(doc, payload);
-    String topic = String(MQTT_DISCOVERY_PREFIX) + "/sensor/" + 
-                   String(MQTT_CLIENT_ID) + "_lora_snr/config";
-    if (!mqtt_.publish(topic.c_str(), payload.c_str(), true)) {
-      Serial.println("[MQTT] Failed to publish LoRa SNR discovery");
-      return false;
-    }
-  }
-  
-  // 3. Last command source sensor
-  {
-    JsonDocument doc;
-    doc["name"] = "Last Command Source";
-    doc["unique_id"] = String(MQTT_CLIENT_ID) + "_last_cmd_source";
-    doc["state_topic"] = getLastCmdSourceTopic();
-    doc["icon"] = "mdi:source-branch";
-    doc["availability_topic"] = getAvailabilityTopic();
-    doc["device"] = deviceDoc;
-    
-    String payload;
-    serializeJson(doc, payload);
-    String topic = String(MQTT_DISCOVERY_PREFIX) + "/sensor/" + 
-                   String(MQTT_CLIENT_ID) + "_last_cmd_source/config";
-    if (!mqtt_.publish(topic.c_str(), payload.c_str(), true)) {
-      Serial.println("[MQTT] Failed to publish Last Command Source discovery");
-      return false;
-    }
-  }
-  
-  // 4. W-BUS health sensor
-  {
-    JsonDocument doc;
-    doc["name"] = "W-BUS Health";
-    doc["unique_id"] = String(MQTT_CLIENT_ID) + "_wbus_health";
-    doc["state_topic"] = getWBusHealthTopic();
-    doc["value_template"] = "{{ value_json.status }}";
-    doc["json_attributes_topic"] = getWBusHealthTopic();
-    doc["icon"] = "mdi:heart-pulse";
-    doc["availability_topic"] = getAvailabilityTopic();
-    doc["device"] = deviceDoc;
-    
-    String payload;
-    serializeJson(doc, payload);
-    String topic = String(MQTT_DISCOVERY_PREFIX) + "/sensor/" + 
-                   String(MQTT_CLIENT_ID) + "_wbus_health/config";
-    if (!mqtt_.publish(topic.c_str(), payload.c_str(), true)) {
-      Serial.println("[MQTT] Failed to publish W-BUS Health discovery");
-      return false;
-    }
-  }
-  
-  Serial.println("[MQTT] Published diagnostic sensor discovery");
-  return true;
 }
-
-// ============================================================================
-// Phase 7: OTA Update Status Publishing
-// ============================================================================
 
 #ifdef MQTT_ENABLE_OTA
 bool MQTTClient::publishOTAStatus(const char* status, const char* message) {
   if (!mqtt_.connected()) return false;
-  
   JsonDocument doc;
   doc["status"] = status;
   doc["timestamp"] = time(nullptr);
-  if (message && strlen(message) > 0) {
-    doc["message"] = message;
-  }
-  
+  if (message && strlen(message) > 0) doc["message"] = message;
   String payload;
   serializeJson(doc, payload);
-  
   return mqtt_.publish(OTA_STATUS_TOPIC, payload.c_str(), true);
 }
 #endif
 
 #endif // ENABLE_MQTT_CONTROL
-
-

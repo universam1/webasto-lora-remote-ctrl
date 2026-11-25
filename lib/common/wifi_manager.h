@@ -18,7 +18,7 @@ public:
   void begin(const char* ssid, const char* username, const char* password, 
              const char* anonymousId = "");
 
-  // Non-blocking update - call in loop()
+  // Non-blocking state machine (no delay/busy wait). Call from the net task only.
   void update();
 
   // Check if WiFi is connected
@@ -55,7 +55,11 @@ private:
   uint8_t cachedBssid_[6];
   int32_t cachedChannel_;
 
+  static constexpr uint32_t kDisconnectSettleMs = 100;
+  bool beginPending_;
+
   void startConnection();
+  void beginAssociation();
   void checkConnection();
   void handleDisconnected();
   void cacheBssidInfo();

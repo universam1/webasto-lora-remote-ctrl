@@ -17,7 +17,8 @@ WiFiManager::WiFiManager()
     connectTimeoutMs_(MQTT_WIFI_TIMEOUT_MS),
     retryIntervalMs_(MQTT_WIFI_RETRY_INTERVAL_MS),
     bssidCached_(false),
-    cachedChannel_(0) {
+    cachedChannel_(0),
+    beginPending_(false) {
   instance_ = this;
 }
 
@@ -47,7 +48,11 @@ void WiFiManager::update() {
       break;
 
     case CONNECTING:
-      checkConnection();
+      if (beginPending_) {
+        if (now - connectStartMs_ >= kDisconnectSettleMs) beginAssociation();
+      } else {
+        checkConnection();
+      }
       break;
 
     case CONNECTED:
@@ -76,9 +81,16 @@ void WiFiManager::startConnection() {
   lastAttemptMs_ = connectStartMs_;
 
   // Set WiFi to station mode
+  // No blocking wait: the clean-disconnect pause is a state (beginPending_), WiFi.begin()
+  // runs from update() once kDisconnectSettleMs have passed.
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
-  delay(100);  // Brief delay for clean disconnect
+  beginPending_ = true;
+}
+
+void WiFiManager::beginAssociation() {
+  beginPending_ = false;
+  connectStartMs_ = millis();
 
   // Configure WPA2 Enterprise PEAP + MSCHAPv2
   // Using WiFi.begin() with WPA2_AUTH_PEAP (recommended method)
