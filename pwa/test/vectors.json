@@ -1,0 +1,19 @@
+{
+  "bleStatusV1": [
+    {"name": "off_idle", "hex": "01e900000000000000008f0055005a005a0000327a85040000000000000000000000",
+     "expect": {"phase": 1, "busAwake": true, "climateActive": false, "interiorValid": true, "transportHealthy": true, "ignitionOn": true, "errorCode": 0, "errorStored": false, "kl30Lost": false, "assumed": false, "stale": false, "climateStatus": 0, "powerW": 0, "fuelUsedMl": 0, "fuelRate_mlph": 0, "interior_dC": 143, "outside_dC": 85, "coolant_dC": 90, "engineCoolant_dC": 90, "voltage_mV": 12800, "odometer_km": 296314, "targetC": 0, "durationMin": 0, "remainingMin": 0, "rssi": 0, "snr": 0, "linkAgeS": 0, "lastCmdId": 0, "lastCmdResult": 0}},
+    {"name": "heating_climate", "hex": "017a00037d137b0045028f005500c80280025e337a8504001478006100a907000701",
+     "expect": {"phase": 2, "busAwake": true, "climateActive": true, "interiorValid": true, "transportHealthy": true, "ignitionOn": false, "errorCode": 0, "errorStored": false, "kl30Lost": false, "assumed": false, "stale": false, "climateStatus": 3, "powerW": 4989, "fuelUsedMl": 123, "fuelRate_mlph": 581, "interior_dC": 143, "outside_dC": 85, "coolant_dC": 712, "engineCoolant_dC": 640, "voltage_mV": 13150, "odometer_km": 296314, "targetC": 20, "durationMin": 120, "remainingMin": 97, "rssi": -87, "snr": 7, "linkAgeS": 0, "lastCmdId": 7, "lastCmdResult": 1}},
+    {"name": "unknown_error", "hex": "0105f30000000000000000800080008000800000ffffffff0000000000000000ff03",
+     "expect": {"phase": 5, "busAwake": false, "climateActive": false, "interiorValid": false, "transportHealthy": false, "ignitionOn": false, "errorCode": 3, "errorStored": true, "kl30Lost": true, "assumed": true, "stale": true, "climateStatus": 0, "powerW": 0, "fuelUsedMl": 0, "fuelRate_mlph": 0, "interior_dC": -32768, "outside_dC": -32768, "coolant_dC": -32768, "engineCoolant_dC": -32768, "voltage_mV": 0, "odometer_km": 4294967295, "targetC": 0, "durationMin": 0, "remainingMin": 0, "rssi": 0, "snr": 0, "linkAgeS": 0, "lastCmdId": 255, "lastCmdResult": 3}}
+  ],
+  "commands": [
+    {"name": "heat", "op": 1, "cmdId": 1, "hex": "0101"},
+    {"name": "stop", "op": 2, "cmdId": 2, "hex": "0202"},
+    {"name": "climateSet 20C 120min", "op": 3, "cmdId": 3, "hex": "0303147800"},
+    {"name": "climateOff", "op": 4, "cmdId": 4, "hex": "0404"},
+    {"name": "query", "op": 5, "cmdId": 5, "hex": "0505"}
+  ],
+  "result": {"hex": "07030100", "cmdId": 7, "stage": 3, "result": 1, "detail": 0},
+  "loraStatusV5": {"hex": "7a000300009210f17b009e8f0075a37a850414", "expect": {"phase": 2, "powerW": 4989, "fuelRate_mlph": 581, "fuelUsedMl": 123, "coolant_dC": 705, "interior_dC": 143, "outside_dC": 85, "voltage_mV": 13150, "odometer_km": 296314, "targetC": 20, "lastCmdSeq": 4242}}
+}
