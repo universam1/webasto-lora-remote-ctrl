@@ -1,6 +1,7 @@
 #include "lora_link.h"
 
 #include <SPI.h>
+#include <stddef.h>
 
 // Static members for ISR
 volatile bool LoRaLink::packetAvailable = false;
@@ -9,6 +10,45 @@ volatile int LoRaLink::isrPacketSize = 0;
 volatile int LoRaLink::isrPacketRssi = 0;
 volatile float LoRaLink::isrPacketSnr = 0.0f;
 volatile uint32_t LoRaLink::isrCallCount = 0;
+volatile bool LoRaLink::txDoneFlag = false;
+bool LoRaLink::txInFlight = false;
+uint32_t LoRaLink::txStartMs = 0;
+
+// Async TX notes (LoRa 0.8.0, checked in LoRa.cpp): endPacket(true) maps DIO0 to TxDone (REG_DIO_MAPPING_1=0x40)
+// and returns. onReceive() and onTxDone() attach the same DIO0 interrupt, and handleDio0Rise() dispatches on
+// the IRQ flags (RxDone -> _onReceive, TxDone -> _onTxDone). LoRa.receive() maps DIO0 back to RxDone, so the
+// radio must be re-armed with receive() after every TX. That is done in service(), not in the ISR (SPI access).
+static const uint32_t kTxTimeoutMs = 4000;  // lost TxDone IRQ: SF11/BW125 airtime of the largest packet is ~1.1 s
+
+#if defined(ARDUINO_ARCH_ESP32)
+#define LORA_ISR_ATTR IRAM_ATTR
+#else
+#define LORA_ISR_ATTR
+#endif
+
+void LORA_ISR_ATTR LoRaLink::onTxDoneISR() {
+  txDoneFlag = true;
+}
+
+// Payload size by message type for the receive length check (Command 4, Status 19, Ack 0).
+static int payloadSizeForType(uint8_t type) {
+  switch (static_cast<proto::MsgType>(type)) {
+    case proto::MsgType::Command: return sizeof(proto::CommandPayload);
+    case proto::MsgType::Status:  return sizeof(proto::StatusPayload);
+    case proto::MsgType::Ack:     return 0;
+    default:                      return -1;
+  }
+}
+
+void LoRaLink::service() {
+  if (!txInFlight) return;
+  if (txDoneFlag || (uint32_t)(millis() - txStartMs) > kTxTimeoutMs) {
+    if (!txDoneFlag) Serial.println("[LORA] TX timeout, re-arming RX");
+    txDoneFlag = false;
+    txInFlight = false;
+    LoRa.receive();  // DIO0 back to RxDone; onReceive callback stays registered
+  }
+}
 
 void LoRaLink::onReceiveISR(int pktSize) {
   // CRITICAL: This runs in ISR context - must read packet data NOW!
@@ -95,6 +135,7 @@ void LoRaLink::enableInterrupt() {
   
   // Set up interrupt on DIO0 pin for RX done
   LoRa.onReceive(onReceiveISR);
+  LoRa.onTxDone(onTxDoneISR);  // same DIO0 pin and attachInterrupt; dispatch by IRQ flag inside the library
   packetAvailable = false;
   interruptMode = true;  // Track that we're in interrupt mode
   
@@ -162,76 +203,50 @@ bool LoRaLink::send(const proto::Packet& pkt) {
     Serial.println("[LORA] send: not configured!");
     return false;
   }
-
-  Serial.printf("[LORA] send: BEFORE TX, isrCallCount=%lu\n", (unsigned long)isrCallCount);
+  service();
+  if (txInFlight) return false;  // previous transmission still on air
 
   // Create a copy to encrypt
   proto::Packet encrypted_pkt = pkt;
-  
-  // Encrypt payload union in-place
   proto::encryptPacket(encrypted_pkt);
-  
-  // Recalculate CRC on encrypted payload
   encrypted_pkt.crc = proto::calcCrc(encrypted_pkt);
 
-  if (!LoRa.beginPacket()) {
+  if (!LoRa.beginPacket()) {  // switches the radio to standby; fails if it is transmitting
     Serial.println("[LORA] send: beginPacket failed!");
     return false;
   }
-  
-  // Calculate wire packet size (header + actual payload + crc)
+
   size_t wireSize = proto::getWirePacketSize(encrypted_pkt);
-  
-  // Write header
-  size_t written = LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.h), sizeof(encrypted_pkt.h));
-  if (written != sizeof(encrypted_pkt.h)) {
-    Serial.printf("[LORA] send: write header failed, wrote %d of %d bytes\n", (int)written, (int)sizeof(encrypted_pkt.h));
-    return false;
-  }
-  
-  // Write payload (only actual payload size, not entire union)
   size_t payloadSize = proto::getPayloadSize(encrypted_pkt);
-  written = LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.p), payloadSize);
-  if (written != payloadSize) {
-    Serial.printf("[LORA] send: write payload failed, wrote %d of %d bytes\n", (int)written, (int)payloadSize);
-    return false;
-  }
-  
-  // Write CRC
-  written = LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.crc), sizeof(encrypted_pkt.crc));
-  if (written != sizeof(encrypted_pkt.crc)) {
-    Serial.printf("[LORA] send: write crc failed, wrote %d of %d bytes\n", (int)written, (int)sizeof(encrypted_pkt.crc));
-    return false;
-  }
-  
-  int result = LoRa.endPacket();
-  if (result != 1) {
-    Serial.printf("[LORA] send: endPacket failed with %d\n", result);
+
+  if (LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.h), sizeof(encrypted_pkt.h)) != sizeof(encrypted_pkt.h) ||
+      LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.p), payloadSize) != payloadSize ||
+      LoRa.write(reinterpret_cast<const uint8_t*>(&encrypted_pkt.crc), sizeof(encrypted_pkt.crc)) != sizeof(encrypted_pkt.crc)) {
+    Serial.println("[LORA] send: FIFO write failed");
+    LoRa.receive();
     return false;
   }
 
-  Serial.printf("[LORA] send: AFTER TX (before receive()), isrCallCount=%lu\n", (unsigned long)isrCallCount);
-
-  // IMPORTANT: Put radio back into receive mode after transmitting!
-  // In interrupt mode, must call LoRa.receive() WITHOUT arguments to keep interrupt active
-  // In polling mode, can just call LoRa.receive()
   if (interruptMode) {
-    // Re-register callback after every TX (workaround for potential callback loss)
-    LoRa.onReceive(onReceiveISR);
-    LoRa.receive();  // Restart RX with interrupt still active
+    // Asynchronous: returns right after switching to TX. TxDone arrives on DIO0 -> onTxDoneISR.
+    txDoneFlag = false;
+    txInFlight = true;
+    txStartMs = millis();
+    LoRa.endPacket(true);
   } else {
-    LoRa.receive();  // Restart RX in polling mode
+    // Polling fallback has no DIO0 interrupt: keep the blocking variant.
+    LoRa.endPacket(false);
+    LoRa.receive();
   }
-  
-  Serial.printf("[LORA] send: AFTER LoRa.receive(), isrCallCount=%lu\n", (unsigned long)isrCallCount);
-  
-  Serial.printf("[LORA] send: transmitted %d bytes OK (seq=%d, encrypted, payloadSize=%d)\n", 
-                (int)wireSize, encrypted_pkt.h.seq, (int)payloadSize);
+
+  Serial.printf("[LORA] send: %s %d bytes (seq=%d, type=%d)\n", interruptMode ? "async" : "sync",
+                (int)wireSize, encrypted_pkt.h.seq, static_cast<int>(encrypted_pkt.h.type));
   return true;
 }
 
 bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
   if (!configured) return false;
+  service();
 
   int pktSize = 0;
   uint8_t rawBuffer[256];
@@ -252,7 +267,8 @@ bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
     memcpy(rawBuffer, (const uint8_t*)isrPacketBuffer, pktSize);
     Serial.printf("[LORA] recv: ISR packet size=%d rssi=%d snr=%.1f\n", pktSize, rssi, snr);
   } else {
-    // No interrupt flag - poll for packet (backwards compatibility)
+    // No interrupt flag - poll for packet (backwards compatibility). Never touch the radio during TX.
+    if (txInFlight) return false;
     pktSize = LoRa.parsePacket();
     if (pktSize <= 0) return false;
     
@@ -270,42 +286,37 @@ bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
     snr = LoRa.packetSnr();
   }
   
-  // Now parse the raw buffer into our packet structure
-  
-  // Now parse the raw buffer into our packet structure
-  // Minimum wire packet: header (10) + crc (2) = 12 bytes
-  // Maximum wire packet: header (10) + status payload (14) + crc (2) = 26 bytes
-  const int MIN_PACKET_SIZE = sizeof(proto::PacketHeader) + sizeof(uint16_t);
-  const int MAX_PACKET_SIZE = sizeof(proto::PacketHeader) + sizeof(proto::StatusPayload) + sizeof(uint16_t);
-  
-  if (pktSize < MIN_PACKET_SIZE || pktSize > MAX_PACKET_SIZE) {
-    Serial.printf("[LORA] Received packet size=%d (expected %d-%d), discarding\n", 
-                  pktSize, MIN_PACKET_SIZE, MAX_PACKET_SIZE);
+  // Wire format (v5): header (6) + payload (by type) + crc (2). Accept only the exact length for the type:
+  // command 12 B, status 27 B, ack 8 B. Everything else is dropped.
+  const int kHeaderSize = sizeof(proto::PacketHeader);
+  const int kCrcSize = sizeof(uint16_t);
+  if (pktSize < kHeaderSize + kCrcSize) {
+    Serial.printf("[LORA] drop: size=%d too short\n", pktSize);
+    return false;
+  }
+  const int expectedPayloadBytes = payloadSizeForType(rawBuffer[offsetof(proto::PacketHeader, type)]);
+  if (expectedPayloadBytes < 0) {
+    Serial.printf("[LORA] drop: unknown type=%d size=%d\n", rawBuffer[offsetof(proto::PacketHeader, type)], pktSize);
+    return false;
+  }
+  if (pktSize != kHeaderSize + expectedPayloadBytes + kCrcSize) {
+    Serial.printf("[LORA] drop: size=%d, expected %d for type=%d\n", pktSize,
+                  kHeaderSize + expectedPayloadBytes + kCrcSize, rawBuffer[offsetof(proto::PacketHeader, type)]);
     return false;
   }
 
-  // Parse header from buffer
+  // Parse header and payload from buffer
   int bufferPos = 0;
   memcpy(&pkt.h, &rawBuffer[bufferPos], sizeof(pkt.h));
   bufferPos += sizeof(pkt.h);
-  
-  // Determine expected payload size based on received packet size
-  int expectedPayloadBytes = pktSize - sizeof(pkt.h) - sizeof(pkt.crc);
-  
-  if (expectedPayloadBytes < 0 || expectedPayloadBytes > static_cast<int>(sizeof(pkt.p))) {
-    Serial.printf("[LORA] recv: invalid payload size %d\n", expectedPayloadBytes);
-    return false;
-  }
-  
-  // Parse payload from buffer
   memcpy(&pkt.p, &rawBuffer[bufferPos], expectedPayloadBytes);
   bufferPos += expectedPayloadBytes;
-  
+
   // Clear the rest of the union to avoid stale data
   if (expectedPayloadBytes < static_cast<int>(sizeof(pkt.p))) {
     memset(reinterpret_cast<uint8_t*>(&pkt.p) + expectedPayloadBytes, 0, sizeof(pkt.p) - expectedPayloadBytes);
   }
-  
+
   // Parse CRC from buffer
   memcpy(&pkt.crc, &rawBuffer[bufferPos], sizeof(pkt.crc));
   bufferPos += sizeof(pkt.crc);
@@ -319,8 +330,8 @@ bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
   // Decrypt payload in-place
   proto::decryptPacket(pkt);
 
-  // Restart receive mode for next packet (important for interrupt mode)
-  LoRa.receive();
+  // Continuous RX stays active after a packet. Re-arm only when no TX is on air (it would abort the TX).
+  if (!txInFlight) LoRa.receive();
 
   Serial.printf("[LORA] recv: decrypted packet OK (seq=%d, type=%d, wireSize=%d, payloadSize=%d)\n", 
                 pkt.h.seq, static_cast<uint8_t>(pkt.h.type), pktSize, expectedPayloadBytes);
