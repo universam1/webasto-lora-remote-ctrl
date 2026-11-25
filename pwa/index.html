@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standheizung</title>
+<meta name="theme-color" content="#0b5cab">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <div id="unsupported" class="banner err" hidden>
+    Web Bluetooth ist hier nicht verfügbar. Bitte Chrome auf Android verwenden und die Seite über https oder localhost öffnen.
+  </div>
+
+  <section class="card" id="conn">
+    <div class="row">
+      <div>
+        <div class="name" id="devName">Kein Gerät</div>
+        <div class="sub" id="connState">Getrennt</div>
+        <div class="sub" id="devInfo"></div>
+      </div>
+      <span class="dot off" id="dot" aria-hidden="true"></span>
+    </div>
+    <label class="field" for="role">Gerät
+      <select id="role">
+        <option value="receiver">Receiver (Fahrzeug, direkt)</option>
+        <option value="sender">Sender (Fernbedienung, LoRa)</option>
+      </select>
+    </label>
+    <div class="btns">
+      <button id="btnConnect" class="primary">Verbinden</button>
+      <button id="btnDisconnect" hidden>Trennen</button>
+    </div>
+    <div class="sub" id="linkAge" hidden></div>
+  </section>
+
+  <section class="state-tile" id="stateTile" data-kind="unknown">
+    <div class="state-main" id="stateText">Unbekannt</div>
+    <div class="state-sub" id="stateSub">Keine Daten</div>
+  </section>
+
+  <section class="grid" id="values">
+    <div class="tile"><div class="lbl">Innen</div><div class="val" id="vInterior">–</div></div>
+    <div class="tile"><div class="lbl">Außen</div><div class="val" id="vOutside">–</div></div>
+    <div class="tile"><div class="lbl">Kühlmittel (Heizung)</div><div class="val" id="vCoolant">–</div></div>
+    <div class="tile"><div class="lbl">Heizleistung</div><div class="val" id="vPower">–</div><div class="sub" id="vRate"></div></div>
+    <div class="tile"><div class="lbl">Verbrauchte Menge</div><div class="val" id="vFuel">–</div></div>
+    <div class="tile"><div class="lbl">Spannung</div><div class="val" id="vVoltage">–</div></div>
+    <div class="tile wide"><div class="lbl">Kilometerstand</div><div class="val" id="vOdo">–</div></div>
+  </section>
+
+  <section class="card error-row" id="errRow">
+    <span class="lbl">Fehler</span> <span id="errText">Kein Fehler</span>
+  </section>
+
+  <section class="card" id="climate">
+    <h2>Klima</h2>
+    <div class="row">
+      <div class="climate-state" id="climState">Aus</div>
+      <div class="sub" id="climRemain"></div>
+    </div>
+    <label class="field" for="target">Zieltemperatur: <b id="targetLbl">20 °C</b>
+      <input type="range" id="target" min="10" max="24" step="1" value="20">
+    </label>
+    <label class="field" for="duration">Dauer: <b id="durationLbl">2 h 0 min</b>
+      <input type="range" id="duration" min="10" max="480" step="10" value="120">
+    </label>
+    <div class="btns">
+      <button id="btnClimOn" class="primary">Klima starten</button>
+      <button id="btnClimOff">Klima aus</button>
+    </div>
+    <p class="hint">Die Dauer gilt für die Klima-Sitzung. Ein Heizlauf dauert etwa 30 Minuten und wird vom Dachbedienteil festgelegt.</p>
+  </section>
+
+  <section class="card">
+    <div class="btns three">
+      <button id="btnHeat" class="primary">Heizen</button>
+      <button id="btnStop">Aus</button>
+      <button id="btnQuery">Abfragen</button>
+    </div>
+    <div class="sub" id="reason" aria-live="polite"></div>
+    <div class="cmdline" id="cmdLine" aria-live="polite">Kein Befehl gesendet</div>
+  </section>
+</main>
+<script src="parser.js"></script>
+<script src="ble.js"></script>
+<script src="demo.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

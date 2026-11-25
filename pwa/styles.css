@@ -1,0 +1,60 @@
+:root {
+  --bg: #f3f5f8; --card: #ffffff; --text: #14181f; --muted: #5a6575; --border: #d5dbe4;
+  --accent: #0b5cab; --accent-text: #ffffff; --ok: #1b7f3b; --warn: #b26a00; --err: #c62828;
+  --tile-off: #e3e8ef; --tile-heat: #ffe2c2; --tile-run: #fff1c2; --tile-vent: #d4ecff; --tile-err: #c62828;
+  --tile-text: #14181f; --tile-err-text: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116; --card: #181d25; --text: #e8ecf2; --muted: #9aa5b5; --border: #2b3340;
+    --accent: #4d9bf0; --accent-text: #08121f; --ok: #5fcf80; --warn: #f0b04d; --err: #ff6b6b;
+    --tile-off: #232a35; --tile-heat: #5a3512; --tile-run: #504410; --tile-vent: #17405f; --tile-err: #b3261e;
+    --tile-text: #e8ecf2; --tile-err-text: #ffffff;
+  }
+}
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
+main { max-width: 640px; margin: 0 auto; padding: 12px 16px 32px; display: flex; flex-direction: column; gap: 12px; }
+h2 { margin: 0 0 8px; font-size: 1.1rem; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.name { font-weight: 600; font-size: 1.1rem; overflow-wrap: anywhere; }
+.sub { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
+.lbl { color: var(--muted); font-size: .8rem; }
+.dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--muted); }
+.dot.ok { background: var(--ok); } .dot.busy { background: var(--warn); } .dot.err { background: var(--err); }
+.banner { border-radius: 12px; padding: 12px 14px; }
+.banner.err { background: var(--err); color: #fff; }
+.field { display: block; margin: 12px 0 0; color: var(--muted); font-size: .9rem; }
+.field b { color: var(--text); }
+select, input[type=range] { width: 100%; margin-top: 6px; }
+select { min-height: 48px; font-size: 1rem; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+input[type=range] { height: 40px; accent-color: var(--accent); }
+.btns { display: flex; gap: 10px; margin-top: 12px; }
+.btns button { flex: 1; min-width: 0; }
+button { min-height: 52px; font: inherit; font-weight: 600; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0 12px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.state-tile { border-radius: 18px; padding: 22px 16px; text-align: center; background: var(--tile-off); color: var(--tile-text); }
+.state-tile[data-kind=heating] { background: var(--tile-heat); }
+.state-tile[data-kind=runon] { background: var(--tile-run); }
+.state-tile[data-kind=vent] { background: var(--tile-vent); }
+.state-tile[data-kind=error] { background: var(--tile-err); color: var(--tile-err-text); }
+.state-main { font-size: 2.2rem; font-weight: 700; }
+.state-sub { min-height: 1.4em; opacity: .85; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px; min-width: 0; }
+.tile.wide { grid-column: 1 / -1; }
+.val { font-size: 1.5rem; font-weight: 700; overflow-wrap: anywhere; }
+.error-row.active { border-color: var(--err); color: var(--err); }
+.climate-state { font-size: 1.3rem; font-weight: 700; }
+.hint { color: var(--muted); font-size: .85rem; margin: 12px 0 0; }
+.btns.three button { padding: 0 4px; }
+.cmdline { margin-top: 10px; font-weight: 600; min-height: 1.4em; overflow-wrap: anywhere; }
+.cmdline[data-kind=ok] { color: var(--ok); } .cmdline[data-kind=err] { color: var(--err); }
+[hidden] { display: none !important; }
+@media (min-width: 900px) {
+  main { max-width: 720px; }
+}
