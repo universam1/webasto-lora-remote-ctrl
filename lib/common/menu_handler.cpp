@@ -55,7 +55,7 @@ void MenuHandler::update()
             // Short press: move to next menu item
             selectedItem = static_cast<MenuItem>(
                 (static_cast<uint8_t>(selectedItem) + 1) %
-                static_cast<uint8_t>(MenuItem::Count));
+                itemCount);
             menuShowTimeMs = now;  // Reset timeout
           }
         }

@@ -41,6 +41,7 @@ WiFiManager g_wifi;
 MQTTClient g_mqtt(g_wifi);
 rt::SnapshotBuffer<NetDiag> g_diag;
 volatile uint32_t g_dropped = 0;
+volatile uint8_t g_linkState = 0;
 
 void onCommand(const rt::Command& cmd) {
   if (g_ctx.cmdQueue && g_ctx.cmdQueue->push(cmd)) return;
@@ -80,6 +81,8 @@ void netTaskFn(void*) {
     // 2. Connection state machines and incoming commands (may block up to the 2 s socket timeout).
     g_wifi.update();
     g_mqtt.update();
+
+    g_linkState = g_mqtt.isConnected() ? 2 : (g_wifi.isConnected() ? 1 : 0);
 
     if (g_mqtt.connectionEpoch() != lastEpoch) {
       lastEpoch = g_mqtt.connectionEpoch();
@@ -148,6 +151,8 @@ bool netTaskStart(rt::CommandQueue<rt::Command, 8>& cmdQueue,
   rt::TaskSpec spec = {"netTask", netTaskFn, 8192, 2, 0, nullptr};
   return rt::startTask(spec) != nullptr;
 }
+
+uint8_t netTaskLinkState() { return g_linkState; }
 
 void netTaskSetDiagnostics(int loraRssi, float loraSnr, const char* cmdSource, bool transportHealthy) {
   NetDiag d;

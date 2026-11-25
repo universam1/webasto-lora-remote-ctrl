@@ -13,6 +13,8 @@ class OledUi {
 
   void setLine(uint8_t idx, const String& text);
   void render();
+  // Raw display access for OledPages. Only the task that owns the OLED may use it.
+  U8G2& display() { return u8g2; }
   void setInverted(bool inverted);
   void drawProgressBar(uint8_t y, uint8_t width, float progress);  // progress 0.0-1.0
 

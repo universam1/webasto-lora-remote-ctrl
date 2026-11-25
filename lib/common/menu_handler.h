@@ -11,14 +11,14 @@ enum class MenuState
 
 enum class MenuItem
 {
-  Start,     // Start heating
-  Stop,      // Stop heating
-  Run10min,  // Run for 10 minutes
-  Run20min,  // Run for 20 minutes
-  Run30min,  // Run for 30 minutes
-  Run90min,  // Run for 90 minutes
-  QueryStatus, // Query W-BUS status
-  Count      // Number of menu items (sentinel)
+  Start,        // Heizen
+  Stop,         // Aus
+  ClimateOn,    // Klima an (stored target and duration)
+  ClimateOff,   // Klima aus
+  QueryStatus,  // Abfrage
+  BlePair,      // BLE koppeln (receiver only)
+  BleClear,     // Bindungen loeschen (receiver only)
+  Count         // Number of menu items (sentinel)
 };
 
 class MenuHandler
@@ -34,6 +34,11 @@ class MenuHandler
 
   // Get current menu state
   MenuState getState() const { return currentState; }
+
+  // Number of items the menu cycles through (default: all, MenuItem::Count).
+  // The sender has no BLE items yet and limits the menu to the first five.
+  void setItemCount(uint8_t n) { itemCount = (n == 0 || n > static_cast<uint8_t>(MenuItem::Count)) ? static_cast<uint8_t>(MenuItem::Count) : n; }
+  uint8_t getItemCount() const { return itemCount; }
 
   // Get currently selected menu item
   MenuItem getSelectedItem() const { return selectedItem; }
@@ -70,6 +75,7 @@ class MenuHandler
   bool buttonWasPressed = false;
   uint32_t menuShowTimeMs = 0;
   bool itemActivated = false;
+  uint8_t itemCount = static_cast<uint8_t>(MenuItem::Count);
   bool longPressTriggered = false;  // Prevents re-triggering on same press
 
   // Constants for button handling
@@ -87,20 +93,20 @@ inline const char *menuItemToStr(MenuItem item)
   switch (item)
   {
   case MenuItem::Start:
-    return "START";
+    return "Heizen";
   case MenuItem::Stop:
-    return "STOP";
-  case MenuItem::Run10min:
-    return "RUN 10min";
-  case MenuItem::Run20min:
-    return "RUN 20min";
-  case MenuItem::Run30min:
-    return "RUN 30min";
-  case MenuItem::Run90min:
-    return "RUN 90min";
+    return "Aus";
+  case MenuItem::ClimateOn:
+    return "Klima an";
+  case MenuItem::ClimateOff:
+    return "Klima aus";
   case MenuItem::QueryStatus:
-    return "STATUS?";
+    return "Abfrage";
+  case MenuItem::BlePair:
+    return "BLE koppeln";
+  case MenuItem::BleClear:
+    return "Bindungen loeschen";
   default:
-    return "UNKNOWN";
+    return "-";
   }
 }

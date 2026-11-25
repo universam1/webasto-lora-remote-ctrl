@@ -26,6 +26,9 @@ bool netTaskStart(rt::CommandQueue<rt::Command, 8>& cmdQueue,
 // cmdSource: "lora", "mqtt", "button", ... (truncated to 15 characters).
 void netTaskSetDiagnostics(int loraRssi, float loraSnr, const char* cmdSource, bool transportHealthy);
 
+// Link state for the OLED: 0 = no WiFi, 1 = WiFi only, 2 = WiFi and MQTT. Wait-free, any task.
+uint8_t netTaskLinkState();
+
 // Number of MQTT commands dropped because the command queue was full.
 uint32_t netTaskDroppedCommands();
 

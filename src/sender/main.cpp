@@ -286,10 +286,10 @@ static const char *menuLabel(MenuItem item)
   {
   case MenuItem::Start: return "Heizen";
   case MenuItem::Stop: return "Aus";
-  case MenuItem::Run10min: return "Klima an";
-  case MenuItem::Run20min: return "Klima aus";
+  case MenuItem::ClimateOn: return "Klima an";
+  case MenuItem::ClimateOff: return "Klima aus";
   case MenuItem::QueryStatus: return "Abfrage";
-  default: return "-";  // Run30min, Run90min: unused
+  default: return "-";  // BLE items: not on the sender yet
   }
 }
 
@@ -299,7 +299,7 @@ static void renderOled(uint32_t now)
   {
     MenuItem selected = menu.getSelectedItem();
     int selectedIdx = static_cast<int>(selected);
-    int totalItems = static_cast<int>(MenuItem::Count);
+    int totalItems = menu.getItemCount();
     const int visibleItems = 4;
     int page = selectedIdx / visibleItems;
     int totalPages = (totalItems + visibleItems - 1) / visibleItems;
@@ -313,7 +313,7 @@ static void renderOled(uint32_t now)
       {
         MenuItem item = static_cast<MenuItem>(itemIdx);
         String label = menuLabel(item);
-        if (item == MenuItem::Run10min)
+        if (item == MenuItem::ClimateOn)
           label += String(" ") + String(gClimateTargetC) + "C " + String(gClimateMinutes) + "m";
         ui.setLine(1 + i, String(item == selected ? "> " : "  ") + label);
       }
@@ -437,8 +437,8 @@ static void handleMenuSelection(MenuItem item)
   {
   case MenuItem::Start: submit(proto::CommandKind::Start, 0, gLastMinutes); break;
   case MenuItem::Stop: submit(proto::CommandKind::Stop, 0, 0); break;
-  case MenuItem::Run10min: submit(proto::CommandKind::ClimateSet, gClimateTargetC, gClimateMinutes); break;
-  case MenuItem::Run20min: submit(proto::CommandKind::ClimateOff, 0, 0); break;
+  case MenuItem::ClimateOn: submit(proto::CommandKind::ClimateSet, gClimateTargetC, gClimateMinutes); break;
+  case MenuItem::ClimateOff: submit(proto::CommandKind::ClimateOff, 0, 0); break;
   case MenuItem::QueryStatus: submit(proto::CommandKind::QueryStatus, 0, 0); break;
   default: break;
   }
@@ -539,6 +539,7 @@ void setup()
 
   // Initialize button/menu on GPIO0
   menu.begin(MENU_BUTTON_PIN);
+  menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // no BLE items on the sender
   Serial.println("[SETUP] Menu button initialized on GPIO0");
 
   // Initialize battery ADC (GPIO35 on TTGO LoRa32 v1.0)
