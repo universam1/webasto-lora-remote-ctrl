@@ -10,7 +10,23 @@
 Two TTGO LoRa32 SX1276 OLED boards:
 
 - **Sender**: sends `start`, `stop`, `run <minutes>` over LoRa; shows receiver/heater status on OLED.
-- **Receiver**: receives commands, controls the heater over **W‑BUS**, reports status back over LoRa; shows state on OLED.
+- **Receiver**: receives commands, controls the heater over **CAN** (default, T5.2) or **W‑BUS**, reports status back over LoRa; shows state on OLED.
+
+## Phase D: CAN transport, climate control, BLE and PWA
+
+Branch `worktree-phase-d`. Protocol is **v5 (magic 0x35)**: flash sender and receiver together.
+
+- **Heater transport**: CAN (TWAI, 100 kbit/s, SN65HVD230) is the default. `pio run -e receiver_wbus` builds the former W-BUS transport (`HEATER_TRANSPORT_WBUS=1`). Ventilation is not implemented over CAN and is ignored (result `Unsupported`).
+- **Listen-only first test**: add `-D CAN_ALLOW_TX=0` to the receiver build flags. Nothing is transmitted then.
+- **Wiring (receiver)**: CAN TX=GPIO17, RX=GPIO25 (10 kΩ pull-up from CTX to 3.3 V recommended). DS18B20 interior sensor on GPIO32 with a 4.7 kΩ pull-up to 3.3 V. In the W-BUS build GPIO17/25 are the W-BUS pins again.
+- **Status values** (LoRa, MQTT, BLE): heater phase, heating power (W), fuel rate (l/h), fuel used (ml), heater coolant, interior (DS18B20), outside, supply voltage, odometer, error code, bus awake, ignition, climate state and target. MQTT additionally publishes one JSON state topic `webasto/receiver/state` and Home Assistant discovery entities for all values.
+- **Climate control**: target 10..24 °C in whole degrees, session duration up to 8 h. It only starts the heater when the interior temperature falls below the target (it never switches off), minimum pause 2 min, back-off after failed starts, low-voltage lockout. The heater run time is chosen by the roof unit (30 min after a CAN start); the controller restarts the heater when needed during the session.
+- **LoRa airtime**: the receiver only transmits while a sender was active within the last 30 min (`LORA_SENDER_ACTIVE_MS`). Intervals: 15 s heating, 30 s climate only, 120 s idle. The sender sends a keep-alive query every 10 min while the user is looking at it.
+- **Receiver OLED**: while the heater runs it shows full-screen pages in large font, switching every second.
+- **Non-blocking design**: one FreeRTOS task per hardware (CAN, LoRa, control, network, UI, BLE), communication through queues and snapshot buffers, no `delay()` in the application code. Deep sleep is not supported in this phase.
+- **BLE and PWA**: the receiver exposes a NimBLE GATT service (status, command, result; bonding with passkey, pairing window 120 s after "BLE koppeln" in the menu). The Android PWA in `pwa/` shows status, history charts (temperatures, power, voltage, fuel), a climate dial and the control buttons. Start it locally with `python3 -m http.server --directory pwa 8000` (Web Bluetooth needs HTTPS or localhost); a demo mode works without a device. Tests: `node --test pwa/test/`.
+- **Tests**: `tools/run_native_tests.sh` runs the host unit tests (CAN codec and FSM, climate controller, codecs, send policy).
+- **Sender menu**: Heizen, Aus, Klima an, Klima aus, Abfrage. The sender has no BLE yet.
 
 ## What’s implemented
 
