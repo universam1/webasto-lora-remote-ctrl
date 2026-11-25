@@ -1,6 +1,6 @@
 // Cache-first app shell. Bump CACHE on every change of a shell file.
-var CACHE = 'standheizung-v1';
-var SHELL = ['./', 'index.html', 'styles.css', 'parser.js', 'ble.js', 'demo.js', 'app.js',
+var CACHE = 'standheizung-v2';
+var SHELL = ['./', 'index.html', 'styles.css', 'parser.js', 'util.js', 'history.js', 'charts.js', 'ble.js', 'demo.js', 'app.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
 self.addEventListener('install', function (e) {
