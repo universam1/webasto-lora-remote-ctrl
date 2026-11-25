@@ -1,0 +1,10 @@
+{
+  "name": "ble_gatt",
+  "version": "1.0.0",
+  "description": "NimBLE GATT server for the Webasto sender/receiver (status, command, result)",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    { "owner": "h2zero", "name": "NimBLE-Arduino", "version": "^2.0" }
+  ]
+}

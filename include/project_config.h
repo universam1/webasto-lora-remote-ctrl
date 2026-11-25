@@ -293,3 +293,56 @@
 #endif // MQTT_ENABLE_OTA
 
 #endif // ENABLE_MQTT_CONTROL
+
+// ============================================================================
+// Phase D: heater transport (CAN default), DS18B20, climate and LoRa send window
+// ============================================================================
+
+// Heater transport: CAN (TWAI) is the default. Define HEATER_TRANSPORT_WBUS=1 for W-BUS.
+// (not defined here on purpose)
+
+#ifndef CAN_TX_PIN
+#define CAN_TX_PIN 17
+#endif
+#ifndef CAN_RX_PIN
+#define CAN_RX_PIN 25
+#endif
+#ifndef CAN_RS_PIN
+#define CAN_RS_PIN -1  // -1: Rs not wired. HIGH = standby/listen-only, LOW = normal mode
+#endif
+#ifndef CAN_BITRATE
+#define CAN_BITRATE 100000
+#endif
+#ifndef CAN_ALLOW_TX
+#define CAN_ALLOW_TX 1  // 0 = listen-only build, setNormalMode(true) fails (CmdResult::NoBus)
+#endif
+#ifndef CAN_WAKE_POLL
+#define CAN_WAKE_POLL 1
+#endif
+#ifndef CAN_WAKE_INTERVAL_MS
+#define CAN_WAKE_INTERVAL_MS 60000
+#endif
+#ifndef DS18B20_PIN
+#define DS18B20_PIN 32
+#endif
+#ifndef CLIMATE_MIN_PAUSE_MS
+#define CLIMATE_MIN_PAUSE_MS 120000
+#endif
+#ifndef LORA_SENDER_ACTIVE_MS
+#define LORA_SENDER_ACTIVE_MS 1800000
+#endif
+#ifndef LORA_SENDER_KEEPALIVE_MS
+#define LORA_SENDER_KEEPALIVE_MS 600000
+#endif
+#ifndef LORA_STATUS_INTERVAL_RUNNING_MS
+#define LORA_STATUS_INTERVAL_RUNNING_MS 15000
+#endif
+#ifndef LORA_STATUS_INTERVAL_CLIMATE_MS
+#define LORA_STATUS_INTERVAL_CLIMATE_MS 30000
+#endif
+#ifndef LORA_STATUS_INTERVAL_IDLE_MS
+#define LORA_STATUS_INTERVAL_IDLE_MS 120000
+#endif
+#ifndef LORA_STATUS_MIN_GAP_MS
+#define LORA_STATUS_MIN_GAP_MS 5000
+#endif

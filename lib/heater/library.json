@@ -1,0 +1,11 @@
+{
+  "name": "heater",
+  "version": "1.0.0",
+  "description": "Heater transport (CAN/TWAI or W-BUS) with its own FreeRTOS task, and a non blocking DS18B20 driver",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    { "name": "OneWire", "owner": "paulstoffregen" },
+    { "name": "DallasTemperature", "owner": "milesburton" }
+  ]
+}
