@@ -8,6 +8,10 @@
 #include "encryption.h"
 #include "menu_handler.h"
 #include "status_codec.h"
+#include "sender_ble_map.h"
+#if defined(ENABLE_BLE) && ENABLE_BLE
+#include "sender_ble.h"
+#endif
 
 // ---------------------------------------------------------------------------------------------
 // Sender-only constants (WP4). Defaults here because include/project_config.h is not owned by this
@@ -60,7 +64,7 @@ static uint16_t gClimateMinutes = SENDER_DEFAULT_CLIMATE_MIN;  // last used clim
 static wh::DecodedStatus gStatus;
 static uint32_t gStatusRxMs = 0;
 
-// User activity: set by button/menu/serial activity and by senderNoteUserActivity() (BLE later).
+// User activity: set by button/menu/serial activity and by senderNoteUserActivity() (also called for BLE activity).
 bool gUserActive = false;
 static uint32_t gUserActivityMs = 0;
 void senderNoteUserActivity()
@@ -73,7 +77,7 @@ void senderNoteUserActivity()
 static float gBattV = 0.0f;
 static uint32_t gLastBattUpdateMs = 0;
 
-// Job result hook. Null now; the BLE package connects it.
+// Job result hook (set by the BLE glue below, null without BLE).
 void (*gJobDone)(uint8_t bleCmdId, uint8_t stage, uint8_t result) = nullptr;
 
 // Short result text on the OLED
@@ -289,7 +293,9 @@ static const char *menuLabel(MenuItem item)
   case MenuItem::ClimateOn: return "Klima an";
   case MenuItem::ClimateOff: return "Klima aus";
   case MenuItem::QueryStatus: return "Abfrage";
-  default: return "-";  // BLE items: not on the sender yet
+  case MenuItem::BlePair: return "BLE koppeln";
+  case MenuItem::BleClear: return "Bindungen loesch.";
+  default: return "-";
   }
 }
 
@@ -399,7 +405,77 @@ static void renderOled(uint32_t now)
   ui.render();
 }
 
-// ---- Commands from menu / serial (and later BLE) ------------------------------------------------
+// ---- BLE glue (commands from the PWA, results back) -------------------------------------------
+#if defined(ENABLE_BLE) && ENABLE_BLE
+static uint8_t gBleLastCmdId = 0;
+static uint8_t gBleLastCmdResult = 0;
+
+static void bleEmit(uint8_t cmdId, uint8_t stage, uint8_t result)
+{
+  // Push with timeout 0: never blocks the loop. A full queue drops the event (the PWA times out).
+  sbl::shared().events.push(wh::makeBleJobEvent(cmdId, stage, result));
+}
+
+// Job hook: sent / acked / done / failed of a job that came from BLE.
+static void bleJobDone(uint8_t cmdId, uint8_t stage, uint8_t result)
+{
+  bleEmit(cmdId, stage, result);
+  if (stage == kStageDone || stage == kStageFailed)
+  {
+    gBleLastCmdId = cmdId;
+    gBleLastCmdResult = result;
+  }
+}
+
+// Takes the commands the NimBLE host queued. One job at a time: while a job runs, further
+// commands are answered with Busy (the same code as the receiver).
+static void serviceBleCommands()
+{
+  sbl::Shared &b = sbl::shared();
+  rt::Command c;
+  while (b.cmdQueue.pop(c))
+  {
+    senderNoteUserActivity();
+    proto::CommandPayload p{};
+    if (!wh::bleCommandToPayload(c, gLastMinutes, p))
+    {
+      bleEmit(c.tag, ble::STAGE_FAILED, (uint8_t)wh::CmdResult::Unsupported);
+      continue;
+    }
+    if (!startJob(p, c.tag))
+    {
+      bleEmit(c.tag, ble::STAGE_FAILED, (uint8_t)wh::CmdResult::Busy);
+      continue;
+    }
+    bleEmit(c.tag, ble::STAGE_QUEUED, (uint8_t)wh::CmdResult::Pending);
+  }
+  // BLE connect/subscribe counts as activity: keeps the receiver sending status while the PWA looks.
+  static uint32_t seenActivity = 0;
+  const uint32_t act = b.lastActivityMs.load();
+  if (act != seenActivity)
+  {
+    seenActivity = act;
+    senderNoteUserActivity();
+  }
+}
+
+// Publish the state for bleTask (single writer: the main loop).
+static void publishBleSnapshot(uint32_t now)
+{
+  static uint32_t lastMs = 0;
+  if (now - lastMs < 100)
+    return;
+  lastMs = now;
+  sbl::Snap s;
+  s.status = gStatus;
+  s.rxMs = gStatusRxMs;
+  s.lastCmdId = gBleLastCmdId;
+  s.lastCmdResult = gBleLastCmdResult;
+  sbl::shared().snap.write(s);
+}
+#endif
+
+// ---- Commands from menu / serial ------------------------------------------------
 
 static bool submit(proto::CommandKind kind, uint8_t targetC, uint16_t minutes)
 {
@@ -440,6 +516,10 @@ static void handleMenuSelection(MenuItem item)
   case MenuItem::ClimateOn: submit(proto::CommandKind::ClimateSet, gClimateTargetC, gClimateMinutes); break;
   case MenuItem::ClimateOff: submit(proto::CommandKind::ClimateOff, 0, 0); break;
   case MenuItem::QueryStatus: submit(proto::CommandKind::QueryStatus, 0, 0); break;
+#if defined(ENABLE_BLE) && ENABLE_BLE
+  case MenuItem::BlePair: sbl::shared().pairRequest.store(true); break;
+  case MenuItem::BleClear: sbl::shared().clearRequest.store(true); break;
+#endif
   default: break;
   }
 }
@@ -539,7 +619,15 @@ void setup()
 
   // Initialize button/menu on GPIO0
   menu.begin(MENU_BUTTON_PIN);
-  menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // no BLE items on the sender
+#if defined(ENABLE_BLE) && ENABLE_BLE
+  // Start BLE before the menu is sized: the BLE items (pairing window, clear bonds) need the stack.
+  gJobDone = bleJobDone;
+  sbl::start(3 * kSenderStatusIntervalMs);
+  menu.setItemCount(sbl::shared().ok.load() ? static_cast<uint8_t>(MenuItem::Count)
+                                            : static_cast<uint8_t>(MenuItem::QueryStatus) + 1);
+#else
+  menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // no BLE items
+#endif
   Serial.println("[SETUP] Menu button initialized on GPIO0");
 
   // Initialize battery ADC (GPIO35 on TTGO LoRa32 v1.0)
@@ -648,8 +736,14 @@ static void senderLoopOnce()
   if (menu.isItemActivated(activatedItem))
     handleMenuSelection(activatedItem);
 
+#if defined(ENABLE_BLE) && ENABLE_BLE
+  serviceBleCommands();
+#endif
   serviceJob(now);
   serviceKeepalive(now);
+#if defined(ENABLE_BLE) && ENABLE_BLE
+  publishBleSnapshot(now);
+#endif
   updateBattery(now);
 
   // OLED refresh: faster in the menu (progress bar), slower otherwise. I2C, short.

@@ -8,6 +8,7 @@ constexpr uint32_t kStackLora = 6144;  // two proto::Packet locals + Serial.prin
 constexpr uint32_t kStackCtrl = 6144;
 constexpr uint32_t kStackUi = 6144;
 constexpr uint32_t kStackBle = 4096;
+constexpr uint32_t kStackBleSender = 4096;  // sender bleTask (same work as the receiver's)
 constexpr uint32_t kStackCan = 6144;
 constexpr uint32_t kStackWbus = 6144;
 
