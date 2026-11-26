@@ -28,11 +28,16 @@ struct Ctx {
   // Activity counters for the LED (uiTask looks at changes).
   std::atomic<uint32_t> loraRxCount{0};
   std::atomic<uint32_t> loraTxCount{0};
+  // Diagnostics (logged by loraTask): result events that could not be delivered.
+  std::atomic<uint32_t> eventsDropped{0};      // per-source queue full
+  std::atomic<uint32_t> stopEventsDropped{0};  // subset of eventsDropped: events of Stop commands
+  std::atomic<uint32_t> eventsUnrouted{0};     // source without a consumer (menu, climate)
   // uiTask -> bleTask requests (the BLE owner task executes them).
   std::atomic<bool> blePairRequest{false};
   std::atomic<bool> bleClearRequest{false};
   std::atomic<bool> bleDefaultPasskey{false};
   std::atomic<bool> bleConnected{false};
+  std::atomic<bool> bleOk{false};  // BLE stack started (set by startBleTask); the BLE menu items need it
   // loraTask -> ctrlTask/uiTask: last received packet and radio state.
   std::atomic<int32_t> loraRssi{-157};
   std::atomic<float> loraSnr{-20.0f};

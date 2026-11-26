@@ -17,19 +17,46 @@ void CommandRouter::emit(const heater::HeaterRequest& r, uint8_t result, uint8_t
   ev.loraSeq = r.loraSeq;
   ev.result = result;
   ev.stage = stage;
+  ev.isStop = r.kind == wh::CmdKind::Stop;
   sink_.emit(ev);
 }
 
+// A Stop that the heater accepted ends the climate session. This happens at acceptance, not at
+// the request: while the Stop is parked the climate session keeps managing the heater.
+void CommandRouter::stopAccepted(const heater::HeaterRequest& r) {
+  climate_.notifyUserStop(now_);
+  persist_ = true;
+  if (r.src == heater::Source::Ble) emit(r, (uint8_t)wh::CmdResult::Pending, 0);  // queued
+}
+
+// Parking rules (one parked request at most):
+//  - A parked Stop is sticky. A newer Heat/Vent is rejected with Busy while it is parked, and it
+//    must not be submitted ahead of it either.
+//  - A newer Stop replaces any parked request (the older one is reported as Busy).
+//  - A Stop that is accepted drops a parked Heat/Vent: it must not start the heater afterwards.
 void CommandRouter::submitOrPark(const heater::HeaterRequest& r, uint32_t now) {
-  if (heater_.submit(r)) {
-    if (r.src == heater::Source::Ble) emit(r, (uint8_t)wh::CmdResult::Pending, 0);  // queued
+  now_ = now;
+  const bool isStop = r.kind == wh::CmdKind::Stop;
+  if (!isStop && parkedIsStop()) {
+    emit(r, (uint8_t)wh::CmdResult::Busy, 4);
     return;
   }
-  // A newer request replaces a parked one (a Stop after a Heat wins, which is what the user wants).
-  if (parked_) emit(parkedReq_, (uint8_t)wh::CmdResult::Busy, 4);
+  if (heater_.submit(r)) {
+    if (isStop) {
+      if (parked_) emit(parkedReq_, (uint8_t)wh::CmdResult::Busy, 4);  // superseded
+      parked_ = false;
+      stopAccepted(r);
+    } else if (r.src == heater::Source::Ble) {
+      emit(r, (uint8_t)wh::CmdResult::Pending, 0);  // queued
+    }
+    return;
+  }
+  if (parked_) emit(parkedReq_, (uint8_t)wh::CmdResult::Busy, 4);  // replaced by a newer request
   parked_ = true;
   parkedReq_ = r;
   parkedAt_ = now;
+  parkedReported_ = false;
+  if (isStop && r.src == heater::Source::Ble) emit(r, (uint8_t)wh::CmdResult::Pending, 0);
 }
 
 void CommandRouter::route(const rt::Command& c, uint32_t now) {
@@ -45,9 +72,7 @@ void CommandRouter::route(const rt::Command& c, uint32_t now) {
       break;
     case rt::CmdType::Stop:
       r.kind = wh::CmdKind::Stop;
-      climate_.notifyUserStop(now);  // also ends the climate session
-      persist_ = true;
-      submitOrPark(r, now);
+      submitOrPark(r, now);  // ends the climate session once the heater accepted the Stop
       break;
     case rt::CmdType::Query:
       // A LoRa query is answered by its own result event (forceNow); do not send twice.
@@ -74,15 +99,32 @@ void CommandRouter::route(const rt::Command& c, uint32_t now) {
 
 void CommandRouter::service(uint32_t now) {
   if (!parked_) return;
+  now_ = now;
+  // Retried every tick (a failed submit is one atomic compare-exchange, no bus traffic). Over CAN a
+  // Stop to an already stopped heater is harmless, so no extra "heater is off" shortcut is used:
+  // the phase is not trusted while a start is still in flight.
   if (heater_.submit(parkedReq_)) {
+    const heater::HeaterRequest r = parkedReq_;
     parked_ = false;
-    if (parkedReq_.src == heater::Source::Ble) emit(parkedReq_, (uint8_t)wh::CmdResult::Pending, 0);
+    if (r.kind == wh::CmdKind::Stop) {
+      stopAccepted(r);
+    } else if (r.src == heater::Source::Ble) {
+      emit(r, (uint8_t)wh::CmdResult::Pending, 0);
+    }
     return;
   }
-  if ((uint32_t)(now - parkedAt_) >= kRetryMs) {
-    parked_ = false;
-    emit(parkedReq_, (uint8_t)wh::CmdResult::Busy, 4);
+  if ((uint32_t)(now - parkedAt_) < kRetryMs) return;
+  if (parkedReq_.kind == wh::CmdKind::Stop) {
+    // Never dropped: tell the source once that the Stop is still pending (stage 1, not final),
+    // keep retrying. The final result comes from the heater event of the Stop.
+    if (!parkedReported_) {
+      parkedReported_ = true;
+      emit(parkedReq_, (uint8_t)wh::CmdResult::Pending, 1);
+    }
+    return;
   }
+  parked_ = false;
+  emit(parkedReq_, (uint8_t)wh::CmdResult::Busy, 4);
 }
 
 void CommandRouter::onHeaterEvent(const heater::HeaterEvent& ev, uint32_t now) {
@@ -96,6 +138,10 @@ void CommandRouter::onHeaterEvent(const heater::HeaterEvent& ev, uint32_t now) {
 }
 
 void CommandRouter::startClimate(uint32_t now) {
+  if (parkedIsStop()) {  // a Stop is waiting for the heater: nothing may start in front of it
+    climate_.notifyStartResult(now, wh::CmdResult::Busy);
+    return;
+  }
   heater::HeaterRequest r;
   r.kind = wh::CmdKind::Heat;
   r.src = heater::Source::Climate;

@@ -22,6 +22,7 @@ struct CmdEvent {
   uint16_t loraSeq;
   uint8_t result;  // wh::CmdResult
   uint8_t stage;   // 0 queued, 1 sent, 2 acked, 3 done, 4 failed
+  bool isStop;     // result of a Stop command (counted separately when it is dropped)
 };
 
 }  // namespace rt

@@ -7,7 +7,7 @@
 // Task        Core Prio Stack  Owns
 // canTask     1    5    (lib)  TWAI (HeaterCan)      [CAN build, lib/heater]
 // wbusTask    1    4    (lib)  Serial2 (HeaterWBus)  [W-BUS build, lib/heater]
-// loraTask    1    4    4096   SX1276 / SPI
+// loraTask    1    4    6144   SX1276 / SPI
 // ctrlTask    1    3    6144   OneWire (DS18B20), NVS, climate controller, command router
 // bleTask     0    2    4096   NimBLE server API (BleServer::service/notifyResult)
 // netTask     0    2    8192   WiFi, PubSubClient (lib/common/net_task)

@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <driver/twai.h>
 
+#include "task_stacks.h"
 #include "task_utils.h"
 
 namespace heater {
@@ -16,7 +17,6 @@ constexpr uint32_t kReinstallMs = 1000;
 constexpr uint32_t kRetryGapMs = 2000;
 constexpr uint32_t kHealthWindowMs = 600000;
 constexpr int kMaxFramesPerTick = 64;
-constexpr uint32_t kStackBytes = 6144;
 
 #ifndef CAN_TX_SINGLE_SHOT
 // 0 = auto retransmit (same as the proven sniffer firmware). A frame sent to a sleeping bus is
@@ -39,7 +39,7 @@ bool HeaterCan::begin() {
   }
   if (!events_.valid()) return false;
   const bool ok = install(false);
-  rt::TaskSpec spec = {"canTask", &HeaterCan::taskEntry, kStackBytes, 5, 1, this};
+  rt::TaskSpec spec = {"canTask", &HeaterCan::taskEntry, rt::kStackCan, 5, 1, this};
   const bool task = rt::startTask(spec) != nullptr;
   return ok && task;
 }

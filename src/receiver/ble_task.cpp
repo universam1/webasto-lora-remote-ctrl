@@ -10,6 +10,7 @@
 #include "can_monitor.h"
 #include "project_config.h"
 #include "status_codec.h"
+#include "task_stacks.h"
 #include "task_utils.h"
 
 #ifndef FW_VERSION
@@ -23,7 +24,6 @@ namespace rx {
 namespace {
 
 constexpr uint32_t kPeriodMs = 100;
-constexpr uint32_t kStackBytes = 4096;
 
 BleServer g_ble;
 
@@ -92,10 +92,11 @@ void startBleTask() {
   if (!g_ble.begin(ctx().cmdQueue, ble::RoleReceiver, transport, FW_VERSION, "Webasto-RX",
                    (uint32_t)BLE_PASSKEY)) {
     Serial.println("[setup] BLE begin failed");
-    return;
+    return;  // bleOk stays false: the menu hides the BLE items
   }
   g_ble.setStatusProvider(provideStatus);
-  rt::TaskSpec spec = {"bleTask", bleTaskFn, kStackBytes, 2, 0, nullptr};
+  ctx().bleOk.store(true);
+  rt::TaskSpec spec = {"bleTask", bleTaskFn, rt::kStackBle, 2, 0, nullptr};
   rt::startTask(spec);
 }
 

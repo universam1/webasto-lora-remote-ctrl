@@ -9,6 +9,7 @@
 #include "project_config.h"
 #include "receiver_ctx.h"
 #include "status_led.h"
+#include "task_stacks.h"
 #include "task_utils.h"
 
 #ifdef ENABLE_MQTT_CONTROL
@@ -19,7 +20,6 @@ namespace rx {
 namespace {
 
 constexpr uint32_t kPollMs = 20;
-constexpr uint32_t kStackBytes = 6144;
 
 OledUi g_ui;
 OledPages g_pages;
@@ -158,6 +158,9 @@ void uiTaskFn(void*) {
 
   for (;;) {
     const uint32_t now = millis();
+    // BLE items only while the BLE stack runs (the build flag alone is not enough: begin may fail).
+    g_menu.setItemCount(c.bleOk.load() ? static_cast<uint8_t>(MenuItem::Count)
+                                       : static_cast<uint8_t>(MenuItem::QueryStatus) + 1);
     g_menu.update();
     MenuItem activated;
     if (g_menu.isItemActivated(activated)) handleMenu(activated);
@@ -207,10 +210,8 @@ void startUiTask() {
   g_ui.render();
   g_pages.begin(g_ui.display());
   g_menu.begin(MENU_BUTTON_PIN);
-#if !(defined(ENABLE_BLE) && ENABLE_BLE)
-  g_menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);
-#endif
-  rt::TaskSpec spec = {"uiTask", uiTaskFn, kStackBytes, 1, 1, nullptr};
+  g_menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // BLE items: see uiTaskFn
+  rt::TaskSpec spec = {"uiTask", uiTaskFn, rt::kStackUi, 1, 1, nullptr};
   rt::startTask(spec);
 }
 

@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 
+#include "task_stacks.h"
 #include "task_utils.h"
 #include "wbus_simple.h"
 
@@ -12,7 +13,6 @@ namespace heater {
 namespace {
 constexpr uint32_t kPollMs = 5000;
 constexpr uint32_t kPollAfterMs = 60000;
-constexpr uint32_t kStackBytes = 6144;
 
 static WBusSimple& wbusPort() {
   static WBusSimple w(Serial2);
@@ -112,7 +112,7 @@ bool HeaterWBus::begin() {
   cur_.healthy = ok;
   cur_.healthDetail = ok ? 0 : 4;
   snap_.write(cur_);
-  rt::TaskSpec spec = {"wbusTask", &HeaterWBus::taskEntry, kStackBytes, 4, 1, this};
+  rt::TaskSpec spec = {"wbusTask", &HeaterWBus::taskEntry, rt::kStackWbus, 4, 1, this};
   return ok && rt::startTask(spec) != nullptr;
 }
 

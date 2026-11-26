@@ -7,24 +7,27 @@
 #include "lora_link.h"
 #include "net_task.h"
 #include "project_config.h"
+#include "lora_ack.h"
 #include "protocol.h"
 #include "receiver_ctx.h"
 #include "send_policy.h"
 #include "status_codec.h"
+#include "task_stacks.h"
 #include "task_utils.h"
 
 namespace rx {
 namespace {
 
 constexpr uint32_t kPeriodMs = 10;
-constexpr uint32_t kStackBytes = 4096;
 constexpr uint32_t kDiagPeriodMs = 1000;
+constexpr uint32_t kStackLogPeriodMs = 60000;
 
 LoRaLink g_lora;
 uint16_t g_seq = 1;
 
-// Last finished command (ACK correlation). Kept as before; deep sleep is not supported any more.
-RTC_DATA_ATTR uint16_t gLastProcessedCmdSeq = 0;
+// ACK correlation (pending seq, last finished seq with validity flag, timeout). Deep sleep is not
+// supported any more, so nothing has to survive a reset.
+rt::LoraAckTracker g_ack;
 
 uint8_t mapError(wh::CmdResult r) {
   switch (r) {
@@ -98,8 +101,6 @@ void loraTaskFn(void*) {
 
   wh::SystemSnapshot snap;
   bool haveSnap = false;
-  bool pendingCmd = false;
-  uint16_t pendingSeq = 0;
   int rssi = 0;
   float snr = 0;
 
@@ -113,6 +114,8 @@ void loraTaskFn(void*) {
   uint8_t sentErr = 0;
   wh::ClimateStatus sentClimate = wh::ClimateStatus::Off;
   uint32_t lastDiagMs = 0;
+  uint32_t lastStackLogMs = 0;
+  uint32_t lastLoggedDrops = 0, lastLoggedStale = 0, lastLoggedTimeouts = 0;
 
   wh::SendPolicyParams params;
   params.senderActiveMs = LORA_SENDER_ACTIVE_MS;
@@ -146,27 +149,26 @@ void loraTaskFn(void*) {
       Serial.printf("[lora] cmd kind=%d min=%u seq=%u rssi=%d snr=%.1f\n", (int)pkt.p.cmd.kind,
                     pkt.p.cmd.minutes, pkt.h.seq, r, s);
 
-      if (pendingCmd && pkt.h.seq == pendingSeq) continue;  // repeat of a running command
-      if (pkt.h.seq == gLastProcessedCmdSeq) {              // repeat of a finished command
+      const rt::LoraAckTracker::Rx rx = g_ack.onPacket(pkt.h.seq);
+      if (rx == rt::LoraAckTracker::Rx::Running) continue;  // repeat of a running command
+      if (rx == rt::LoraAckTracker::Rx::Done) {             // repeat of a finished command
         forcePending = true;
         errOverride = 0;
         continue;
       }
       rt::Command cmd;
       if (!mapCommand(pkt, cmd)) {
-        gLastProcessedCmdSeq = pkt.h.seq;
+        g_ack.finish(pkt.h.seq);
         forcePending = true;
         errOverride = wh::kErrUnsupported;
         continue;
       }
-      if (pendingCmd) {  // the sender runs one job at a time; a new seq replaces the old one
-        pendingCmd = false;
-      }
+      // The sender runs one job at a time; a new seq replaces a pending one (its late result is
+      // ignored by the tracker).
       if (c.cmdQueue.push(cmd)) {
-        pendingCmd = true;
-        pendingSeq = pkt.h.seq;
+        g_ack.begin(pkt.h.seq, now);
       } else {  // queue full: answer with an error status at once
-        gLastProcessedCmdSeq = pkt.h.seq;
+        g_ack.finish(pkt.h.seq);
         forcePending = true;
         errOverride = wh::kErrNotAdopted;
       }
@@ -176,10 +178,15 @@ void loraTaskFn(void*) {
     rt::CmdEvent ev;
     while (c.loraEvents.pop(ev)) {
       if (ev.stage < 3) continue;
-      gLastProcessedCmdSeq = ev.loraSeq;
-      if (pendingCmd && ev.loraSeq == pendingSeq) pendingCmd = false;
+      if (!g_ack.onResult(ev.loraSeq)) continue;  // result of an older seq: not the ACK
       forcePending = true;
       errOverride = ev.stage == 4 ? mapError((wh::CmdResult)ev.result) : 0;
+    }
+    // A lost result event must not block the ACK forever: answer failed, the sender retries.
+    if (g_ack.checkTimeout(now)) {
+      Serial.println("[lora] pending command timed out, answering failed");
+      forcePending = true;
+      errOverride = wh::kErrNotAdopted;
     }
     if (c.forceStatus.exchange(false)) forcePending = true;
 
@@ -203,7 +210,7 @@ void loraTaskFn(void*) {
         st.h.src = LORA_NODE_RECEIVER;
         st.h.dst = LORA_NODE_SENDER;
         st.h.seq = g_seq;
-        wh::packLoraStatus(snap, gLastProcessedCmdSeq, errOverride, st.p.status);
+        wh::packLoraStatus(snap, g_ack.wireLastSeq(), errOverride, st.p.status);
         st.p.status.lastRssiDbm = (int8_t)rssi;
         st.p.status.lastSnrDb = (int8_t)snr;
         st.crc = proto::calcCrc(st);
@@ -222,6 +229,25 @@ void loraTaskFn(void*) {
         forcePending = false;  // nobody asked: nothing to answer
       } else if (forcePending && (uint32_t)(now - in.lastSenderRequestMs) >= params.senderActiveMs) {
         forcePending = false;  // window closed (e.g. a Query from BLE long after the sender)
+      }
+    }
+
+    // Diagnostics: counters only when they change, stack watermarks every minute.
+    {
+      const uint32_t drops = c.eventsDropped.load() + c.eventsUnrouted.load();
+      if (drops != lastLoggedDrops || g_ack.staleResults() != lastLoggedStale ||
+          g_ack.timeouts() != lastLoggedTimeouts) {
+        lastLoggedDrops = drops;
+        lastLoggedStale = g_ack.staleResults();
+        lastLoggedTimeouts = g_ack.timeouts();
+        Serial.printf("[diag] events dropped=%u (stop=%u) unrouted=%u stale_lora=%u lora_timeouts=%u\n",
+                      (unsigned)c.eventsDropped.load(), (unsigned)c.stopEventsDropped.load(),
+                      (unsigned)c.eventsUnrouted.load(), (unsigned)lastLoggedStale,
+                      (unsigned)lastLoggedTimeouts);
+      }
+      if ((uint32_t)(now - lastStackLogMs) >= kStackLogPeriodMs) {
+        lastStackLogMs = now;
+        rt::logStackWatermarks();
       }
     }
 
@@ -249,7 +275,7 @@ bool startLoraTask() {
   ctx().loraOk.store(ok);
   Serial.printf("[setup] LoRa %s\n", ok ? "OK (IRQ)" : "FAIL");
   if (!ok) return false;
-  rt::TaskSpec spec = {"loraTask", loraTaskFn, kStackBytes, 4, 1, nullptr};
+  rt::TaskSpec spec = {"loraTask", loraTaskFn, rt::kStackLora, 4, 1, nullptr};
   return rt::startTask(spec) != nullptr;
 }
 

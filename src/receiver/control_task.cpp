@@ -10,6 +10,7 @@
 #include "heater_iface.h"
 #include "project_config.h"
 #include "receiver_ctx.h"
+#include "task_stacks.h"
 #include "task_utils.h"
 
 namespace rx {
@@ -18,7 +19,6 @@ namespace {
 constexpr uint32_t kPeriodMs = 100;
 constexpr uint32_t kVoltageMaxAgeMs = 600000;      // 10 min
 constexpr uint32_t kRemainingSaveMs = 15UL * 60 * 1000;
-constexpr uint32_t kStackBytes = 6144;
 
 // Result of the last finished command, for the ACK status (LoRa) and the BLE status.
 struct LastCmd {
@@ -35,20 +35,27 @@ class Sink : public EventSink {
       lastCmd.result = (wh::CmdResult)ev.result;
       c.lastCmdSource.store((uint8_t)ev.src);
     }
-    // Every event goes to the queue of its own source only. A full queue drops the event: the
-    // sender repeats its command and the BLE client times out after 25 s.
+    // Every event goes to the queue of its own source only. A full queue drops the event (counted;
+    // loraTask answers a lost LoRa result by its pending timeout, the BLE client times out after
+    // 25 s). Menu and Climate events have no consumer: counted as unrouted, not as dropped.
+    bool queued = true;
     switch (ev.src) {
       case rt::Source::Lora:
-        c.loraEvents.push(ev);
+        queued = c.loraEvents.push(ev);
         break;
       case rt::Source::Ble:
-        c.bleEvents.push(ev);
+        queued = c.bleEvents.push(ev);
         break;
       case rt::Source::Mqtt:
-        c.netEvents.push(ev);
+        queued = c.netEvents.push(ev);
         break;
       default:
+        c.eventsUnrouted.fetch_add(1);
         break;
+    }
+    if (!queued) {
+      c.eventsDropped.fetch_add(1);
+      if (ev.isStop) c.stopEventsDropped.fetch_add(1);
     }
   }
   void forceStatus() override { ctx().forceStatus.store(true); }
@@ -165,7 +172,7 @@ void controlTaskFn(void*) {
 }  // namespace
 
 void startControlTask() {
-  rt::TaskSpec spec = {"ctrlTask", controlTaskFn, kStackBytes, 3, 1, nullptr};
+  rt::TaskSpec spec = {"ctrlTask", controlTaskFn, rt::kStackCtrl, 3, 1, nullptr};
   rt::startTask(spec);
 }
 

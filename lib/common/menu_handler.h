@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <cstdint>
 
+#include "menu_clamp.h"
+
 enum class MenuState
 {
   Hidden,    // Menu not shown
@@ -37,7 +39,13 @@ class MenuHandler
 
   // Number of items the menu cycles through (default: all, MenuItem::Count).
   // The sender has no BLE items yet and limits the menu to the first five.
-  void setItemCount(uint8_t n) { itemCount = (n == 0 || n > static_cast<uint8_t>(MenuItem::Count)) ? static_cast<uint8_t>(MenuItem::Count) : n; }
+  // A shrinking count clamps the selection (there is no separate scroll offset: the page is
+  // derived from the selected item).
+  void setItemCount(uint8_t n)
+  {
+    itemCount = rt::menuClampCount(n, static_cast<uint8_t>(MenuItem::Count));
+    selectedItem = static_cast<MenuItem>(rt::menuClampSelected(static_cast<uint8_t>(selectedItem), itemCount));
+  }
   uint8_t getItemCount() const { return itemCount; }
 
   // Get currently selected menu item
