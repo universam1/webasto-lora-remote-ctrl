@@ -3,3 +3,4 @@
 require('./parser.test.js');
 require('./history.test.js');
 require('./charts.test.js');
+require('./util.test.js');

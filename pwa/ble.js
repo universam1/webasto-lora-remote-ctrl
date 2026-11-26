@@ -12,11 +12,12 @@
 
   function supported() { return !!(root.navigator && root.navigator.bluetooth); }
 
-  // Callbacks: onState(text, kind), onInfo(info), onStatus(status), onError(msg), onBusy(bool), onResult(res, text)
+  // Callbacks: onSearch('searching'|'timeout'|'idle'), onState(text, kind), onInfo(info), onStatus(status), onError(msg), onBusy(bool), onResult(res, text)
   function Ble(cb) {
     this.cb = cb || {};
     this.device = null; this.chr = null; this.info = null;
     this.userDisconnect = false; this.attempt = 0; this.timer = null;
+    this.role = 'receiver'; this._watch = null; this._opening = false; this.needsResume = false;
     this.cmdId = 0; this.pending = null;
     var self = this;
     this._onStatus = function (ev) { self._handleStatus(ev.target.value); };
@@ -48,26 +49,113 @@
     p.resolve({ ok: ok, text: text, result: r || null });
   };
 
-  // Must be called from a user gesture.
+  var WATCH_TIMEOUT_MS = 20000;
+  var MAX_ATTEMPTS = 8; // automatic retries after a failed connect, then wait for a visibility change or the button
+  var ROLE_NAME = ['receiver', 'sender'];
+
+  function save(k, v) { try { root.localStorage.setItem(k, v); } catch (e) { /* no storage */ } }
+  function load(k) { try { return root.localStorage.getItem(k); } catch (e) { return null; } }
+  function visible() { return !root.document || root.document.visibilityState !== 'hidden'; }
+  function canList() { return supported() && typeof root.navigator.bluetooth.getDevices === 'function'; }
+
+  Ble.prototype._search = function (kind) { if (this.cb.onSearch) this.cb.onSearch(kind); };
+  Ble.prototype._wantRole = function () { return this.role === 'sender' ? 'sender' : 'receiver'; };
+
+  Ble.prototype._attach = function (dev) {
+    if (this.device && this.device !== dev) this.device.removeEventListener('gattserverdisconnected', this._onDisc);
+    this.device = dev;
+    dev.removeEventListener('gattserverdisconnected', this._onDisc);
+    dev.addEventListener('gattserverdisconnected', this._onDisc);
+  };
+
+  // First pairing. Must be called from a user gesture. The chooser lists only devices of the chosen role.
   Ble.prototype.connect = async function () {
     if (!supported()) throw new Error('Web Bluetooth nicht verfügbar');
-    this.userDisconnect = false; this.attempt = 0; clearTimeout(this.timer);
+    this.cancelSearch(); this.userDisconnect = false; this.attempt = 0; clearTimeout(this.timer);
     this._state('Suche Gerät …', 'busy');
+    var dev;
     try {
-      this.device = await root.navigator.bluetooth.requestDevice({
-        filters: [{ services: [UUID.service] }], optionalServices: [UUID.service]
+      dev = await root.navigator.bluetooth.requestDevice({
+        filters: [{ services: [UUID.service], namePrefix: root.Util.ROLE_PREFIX[this._wantRole()] }],
+        optionalServices: [UUID.service]
       });
     } catch (e) {
       this._state('Getrennt', 'off');
       if (e && e.name === 'NotFoundError') return false; // user cancelled
       throw e;
     }
-    this.device.removeEventListener('gattserverdisconnected', this._onDisc);
-    this.device.addEventListener('gattserverdisconnected', this._onDisc);
+    this._attach(dev);
     return this._open();
   };
 
+  // Reconnect without the chooser. Resolves with 'connected' | 'failed' | 'unsupported' | 'none' | 'timeout' | 'busy' | 'cancel'.
+  Ble.prototype.autoConnect = async function () {
+    if (!canList()) return 'unsupported';
+    if (this.isConnected() || this._watch || this._opening) return 'busy';
+    if (!visible()) { this.needsResume = true; return 'timeout'; }
+    var list;
+    try { list = await root.navigator.bluetooth.getDevices(); } catch (e) { return 'unsupported'; }
+    var dev = root.Util.pickDevice(list, { id: load('bleDeviceId'), name: load('bleDeviceName'), role: this._wantRole() });
+    if (!dev) return 'none';
+    this.userDisconnect = false; this.attempt = 0; clearTimeout(this.timer);
+    return this._watchAndOpen(dev);
+  };
+
+  // Continue after the page became visible again (or from the retry button).
+  Ble.prototype.resume = function () {
+    if (this.userDisconnect || this.isConnected() || this._watch || this._opening || !visible()) return Promise.resolve('busy');
+    this.needsResume = false; clearTimeout(this.timer);
+    if (this.device && this._wantRole() === this._deviceRole()) return this._watchAndOpen(this.device);
+    return this.autoConnect();
+  };
+
+  Ble.prototype._deviceRole = function () {
+    var n = this.device && this.device.name || '';
+    return n.indexOf(root.Util.ROLE_PREFIX.sender) === 0 ? 'sender' : 'receiver';
+  };
+
+  // Waits for one advertisement of dev (so it is known to be in range), then connects. Never loops.
+  Ble.prototype._watchAndOpen = async function (dev) {
+    var self = this;
+    this._attach(dev);
+    if (typeof dev.watchAdvertisements !== 'function') return (await this._open()) ? 'connected' : 'failed';
+    var ac = new root.AbortController(), done = false, result = 'timeout', t, onAdv;
+    var finished = new Promise(function (resolve) {
+      function end(r) {
+        if (done) return; done = true; result = r; clearTimeout(t);
+        dev.removeEventListener('advertisementreceived', onAdv);
+        try { ac.abort(); } catch (e) { /* ignore */ }
+        resolve();
+      }
+      onAdv = function () { end('found'); };
+      dev.addEventListener('advertisementreceived', onAdv);
+      ac.signal.addEventListener('abort', function () { end('cancel'); });
+      t = setTimeout(function () { end('timeout'); }, WATCH_TIMEOUT_MS);
+      self._watch = { cancel: function () { end('cancel'); } };
+    });
+    this._search('searching'); this._state('Suche Gerät …', 'busy');
+    try { await dev.watchAdvertisements({ signal: ac.signal }); }
+    catch (e) { // not allowed or not supported: plain connect instead
+      if (!done) { this._watch = null; done = true; clearTimeout(t); dev.removeEventListener('advertisementreceived', onAdv); this._search('idle'); return (await this._open()) ? 'connected' : 'failed'; }
+    }
+    await finished;
+    this._watch = null; this._search('idle');
+    if (result === 'found') return (await this._open()) ? 'connected' : 'failed';
+    if (result === 'cancel') { this._state('Getrennt', 'off'); return 'cancel'; }
+    this.needsResume = true;
+    this._search('timeout'); this._state('Gerät nicht in Reichweite', 'off');
+    return 'timeout';
+  };
+
+  Ble.prototype.cancelSearch = function () { if (this._watch) this._watch.cancel(); };
+
   Ble.prototype._open = async function () {
+    if (this._opening) return false;
+    this._opening = true;
+    try { return await this._openInner(); } finally { this._opening = false; }
+  };
+
+  Ble.prototype._openInner = async function () {
     var self = this;
     this._state('Verbinde …', 'busy');
     try {
@@ -77,8 +165,13 @@
         info: await svc.getCharacteristic(UUID.info), status: await svc.getCharacteristic(UUID.status),
         command: await svc.getCharacteristic(UUID.command), result: await svc.getCharacteristic(UUID.result)
       };
-      this.chr = c;
-      this.info = P.parseInfo(await c.info.readValue());
+      var info = P.parseInfo(await c.info.readValue());
+      if (ROLE_NAME[info.role] !== this._wantRole()) { // never keep a session with the wrong role
+        var e0 = new Error('Falsches Gerät: ' + (this.device.name || '?') + ' ist ein ' + info.roleText + ', erwartet wird ' + (this._wantRole() === 'sender' ? 'Sender' : 'Receiver') + '. Rolle in den Einstellungen prüfen.');
+        e0.code = 'WRONG_ROLE'; throw e0;
+      }
+      this.chr = c; this.info = info;
+      save('bleDeviceId', this.device.id || ''); save('bleDeviceName', this.device.name || ''); save('bleDeviceRole', ROLE_NAME[info.role] || '');
       if (this.cb.onInfo) this.cb.onInfo(this.info, this.device.name || '');
       c.status.removeEventListener('characteristicvaluechanged', this._onStatus);
       c.result.removeEventListener('characteristicvaluechanged', this._onResult);
@@ -87,14 +180,15 @@
       await c.status.startNotifications();
       await c.result.startNotifications();
       this._handleStatus(await c.status.readValue());
-      this.attempt = 0;
+      this.attempt = 0; this.needsResume = false;
       this._state('Verbunden', 'ok');
       return true;
     } catch (e) {
-      if (e && e.code === 'INCOMPATIBLE') {
-        this.userDisconnect = true; // do not retry against incompatible firmware
+      if (e && (e.code === 'INCOMPATIBLE' || e.code === 'WRONG_ROLE')) {
+        this.userDisconnect = true; // do not retry against incompatible firmware or the wrong device
+        this.chr = null;
         if (this.cb.onError) this.cb.onError(e.message);
-        this._state('Firmware inkompatibel', 'err');
+        this._state(e.code === 'WRONG_ROLE' ? 'Falsches Gerät' : 'Firmware inkompatibel', 'err');
         try { if (this.device.gatt.connected) this.device.gatt.disconnect(); } catch (x) { /* ignore */ }
         return false;
       }
@@ -111,18 +205,27 @@
     this._schedule();
   };
 
+  // After a link drop or a failed connect: wait (back-off), then look for the device's advertisement first
+  // (it may be out of range) and connect only if it is seen. Gives up after MAX_ATTEMPTS.
   Ble.prototype._schedule = function () {
     var self = this;
     if (this.userDisconnect || !this.device) { this._state('Getrennt', 'off'); return; }
+    if (this.attempt >= MAX_ATTEMPTS) {
+      this.needsResume = true; this._search('timeout'); this._state('Verbindung fehlgeschlagen', 'off'); return;
+    }
     var s = BACKOFF_S[Math.min(this.attempt, BACKOFF_S.length - 1)];
     this.attempt++;
     this._state('Getrennt, neuer Versuch in ' + s + ' s', 'busy');
     clearTimeout(this.timer);
-    this.timer = setTimeout(function () { if (!self.userDisconnect) self._open(); }, s * 1000);
+    this.timer = setTimeout(function () {
+      if (self.userDisconnect || self.isConnected() || self._watch || self._opening) return;
+      if (!visible()) { self.needsResume = true; self._search('timeout'); self._state('Getrennt', 'off'); return; }
+      self._watchAndOpen(self.device);
+    }, s * 1000);
   };
 
   Ble.prototype.disconnect = function () {
-    this.userDisconnect = true; clearTimeout(this.timer);
+    this.userDisconnect = true; clearTimeout(this.timer); this.cancelSearch();
     if (this.pending) this._finish(false, 'Verbindung getrennt', null);
     try { if (this.device && this.device.gatt.connected) this.device.gatt.disconnect(); } catch (e) { /* ignore */ }
     this._state('Getrennt', 'off');
@@ -152,5 +255,5 @@
     });
   };
 
-  root.Ble = { UUID: UUID, supported: supported, create: function (cb) { return new Ble(cb); }, BACKOFF_S: BACKOFF_S, CMD_TIMEOUT_MS: CMD_TIMEOUT_MS };
+  root.Ble = { UUID: UUID, supported: supported, canList: canList, WATCH_TIMEOUT_MS: WATCH_TIMEOUT_MS, create: function (cb) { return new Ble(cb); }, BACKOFF_S: BACKOFF_S, CMD_TIMEOUT_MS: CMD_TIMEOUT_MS };
 }(typeof self !== 'undefined' ? self : this));

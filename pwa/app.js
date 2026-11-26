@@ -153,16 +153,18 @@
     if (stale) $('staleText').textContent = 'Daten veraltet, letzte Aktualisierung ' + U.agoText(age) + '.';
   }
 
-  var connKind = 'off';
+  var connKind = 'off', devLabel = '', searching = false, retryable = false;
   function setConn(text, kind) {
     connKind = kind || 'off';
-    $('connState').textContent = text;
+    $('connState').textContent = text + (connKind === 'ok' && devLabel ? ' · ' + devLabel : '');
     $('connChip').dataset.kind = connKind;
     connected = !!(ble && ble.isConnected());
     if (!connected || connKind !== 'ok') recorder.markGap();
     $('btnConnect').hidden = connKind === 'ok' || connKind === 'busy';
     $('btnDisconnect').hidden = !(connKind === 'ok' || connKind === 'busy');
     $('role').disabled = connKind === 'ok' || connKind === 'busy';
+    $('btnRetry').hidden = !(retryable && connKind === 'off');
+    $('btnDisconnect').textContent = searching ? 'Abbrechen' : 'Trennen';
     var load = connKind === 'busy' && !lastStatus;
     $('stateTile').classList.toggle('loading', load); $('values').classList.toggle('loading', load); $('conn').classList.toggle('loading', load);
     updateButtons(); updateAge();
@@ -180,8 +182,9 @@
 
   var callbacks = {
     onState: function (t, k) { setConn(t, k); },
+    onSearch: function (kind) { searching = kind === 'searching'; retryable = kind === 'timeout'; },
     onInfo: function (info, name) {
-      roleOfDevice = info.role;
+      roleOfDevice = info.role; devLabel = name || '';
       $('devName').textContent = name || info.roleText;
       $('devInfo').textContent = info.roleText + ' · ' + info.transportText + ' · FW ' + (info.fw || '?');
     },
@@ -429,14 +432,19 @@
       installEvt.prompt(); installEvt.userChoice.then(function () { installEvt = null; $('btnInstall').hidden = true; });
     });
     if (window.matchMedia && matchMedia('(display-mode: standalone)').matches) $('installHint').textContent = 'Die App ist installiert.';
-    document.addEventListener('visibilitychange', function () { applyWake(); if (document.visibilityState === 'hidden') persist(); });
+    document.addEventListener('visibilitychange', function () {
+      applyWake();
+      if (document.visibilityState === 'hidden') persist();
+      else if (!demo && ble && !connected && !ble.userDisconnect) autoConnect(!!ble.device);
+    });
     window.addEventListener('pagehide', persist);
   }
 
   function bind() {
     var role = store('role');
     if (role === 'sender' || role === 'receiver') $('role').value = role;
-    $('role').addEventListener('change', function () { store('role', $('role').value); });
+    $('role').addEventListener('change', function () { store('role', $('role').value); if (ble) ble.role = $('role').value; });
+    $('btnRetry').addEventListener('click', function () { retryable = false; autoConnect(true); });
 
     $('btnConnect').addEventListener('click', function () {
       ble.connect().catch(function (e) { var m = 'Verbindung fehlgeschlagen: ' + (e && e.message ? e.message : e); setCmdLine(m, 'err'); toast(m, 'err'); setConn('Getrennt', 'off'); });
@@ -460,10 +468,21 @@
     Array.prototype.forEach.call(document.querySelectorAll('#tabbar a'), function (a) { a.addEventListener('click', function () { haptic(8); }); });
   }
 
+  // Reconnect without the chooser (only once the device was paired through the chooser).
+  var AUTO_TEXT = { unsupported: 'Automatisches Verbinden wird hier nicht unterstützt. Bitte „Verbinden“ wählen.', none: 'Noch kein Gerät gekoppelt. Bitte einmal „Verbinden“ wählen.' };
+  function autoConnect(manual) {
+    if (demo || !ble.autoConnect) return;
+    var p = manual ? ble.resume() : ble.autoConnect();
+    p.then(function (r) {
+      if (AUTO_TEXT[r] && !connected) { $('devInfo').textContent = AUTO_TEXT[r]; setConn('Getrennt', 'off'); }
+    }).catch(function (e) { setConn('Getrennt', 'off'); setCmdLine('Verbindung fehlgeschlagen: ' + (e && e.message ? e.message : e), 'err'); });
+  }
+
   function init() {
     applyTheme(); buildClimate(); buildChartUi(); bind(); bindSettings();
     if (!demo && !window.Ble.supported()) { $('unsupported').hidden = false; $('btnConnect').disabled = true; }
     ble = demo ? window.Demo.create(callbacks) : window.Ble.create(callbacks);
+    ble.role = $('role').value;
     showView(location.hash.slice(1), true);
     setConn('Getrennt', 'off');
     if (demo) {
@@ -471,6 +490,7 @@
       $('devName').textContent = 'Demo-Modus'; ble.connect(); renderCharts(true); updateSparks();
     } else {
       db.load().then(function (rows) { storageOk = rows !== null; if (rows) hist.load(rows); renderCharts(true); updateSparks(); });
+      autoConnect(false);
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { /* offline cache is optional */ });
     }
     var n = 0;

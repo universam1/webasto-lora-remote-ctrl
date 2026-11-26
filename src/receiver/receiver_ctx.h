@@ -5,6 +5,7 @@
 #include <atomic>
 #include <stdint.h>
 
+#include "ble_name.h"
 #include "command_queue.h"
 #include "commands.h"
 #include "heater_types.h"
@@ -37,6 +38,7 @@ struct Ctx {
   std::atomic<bool> bleClearRequest{false};
   std::atomic<bool> bleDefaultPasskey{false};
   std::atomic<bool> bleConnected{false};
+  char bleName[ble::kNameLen] = {0};  // written once by startBleTask before bleOk is set
   std::atomic<bool> bleOk{false};  // BLE stack started (set by startBleTask); the BLE menu items need it
   // loraTask -> ctrlTask/uiTask: last received packet and radio state.
   std::atomic<int32_t> loraRssi{-157};

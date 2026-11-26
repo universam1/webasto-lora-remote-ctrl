@@ -5,7 +5,9 @@
 #if defined(ENABLE_BLE) && ENABLE_BLE
 
 #include <Arduino.h>
+#include <esp_mac.h>
 
+#include "ble_name.h"
 #include "ble_server.h"
 #include "can_monitor.h"
 #include "project_config.h"
@@ -89,7 +91,15 @@ void startBleTask() {
   const uint8_t transport = ble::TransportCan;
 #endif
   ctx().bleDefaultPasskey.store((uint32_t)BLE_PASSKEY == (uint32_t)BLE_DEFAULT_PASSKEY);
-  if (!g_ble.begin(ctx().cmdQueue, ble::RoleReceiver, transport, FW_VERSION, "Webasto-RX",
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_BT);
+  char* name = ctx().bleName;
+  if (!ble::makeBleName(name, sizeof(ctx().bleName), ble::RoleReceiver, mac)) {
+    Serial.println("[setup] BLE name failed");
+    return;
+  }
+  Serial.printf("[setup] BLE name: %s\n", name);
+  if (!g_ble.begin(ctx().cmdQueue, ble::RoleReceiver, transport, FW_VERSION, name,
                    (uint32_t)BLE_PASSKEY)) {
     Serial.println("[setup] BLE begin failed");
     return;  // bleOk stays false: the menu hides the BLE items

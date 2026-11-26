@@ -142,6 +142,11 @@ void drawNormal(uint32_t now, const wh::SystemSnapshot& s, bool haveSnap) {
     l5 = st == 2 ? "WiFi+MQTT OK" : (st == 1 ? "WiFi OK, MQTT..." : "WiFi: verbinde");
   }
 #endif
+#if defined(ENABLE_BLE) && ENABLE_BLE
+  // Every third 3 s slot shows the BLE name (so it is visible even while WiFi/MQTT text occupies the line).
+  if (ctx().bleOk.load() && (now / 3000) % 3 == 2 && !(ctx().bleDefaultPasskey.load() && ((now / 3000) & 1)))
+    l5 = ctx().bleName;
+#endif
   if (!h.healthy) l5 = h.healthDetail == 4 ? "W-BUS gestoert" : "CAN gestoert";
   g_ui.setLine(5, l5);
 }
