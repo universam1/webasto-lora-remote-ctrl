@@ -372,6 +372,62 @@ Sources:
 - https://raw.githubusercontent.com/futuranet/libwbus/master/wbus/wbus_const.h
 - Webasto 9012106D (T5 TT-C kit) and 9030705C (Telestart T91/T100)
 
+## Next steps in the car
+
+Order of work; each block ends with a decision or a result for this document.
+
+**0. Preparation**
+- Keep the laptop awake: `systemd-inhibit --what=sleep:idle --why="CAN" sleep infinity`.
+- Sniffer at the radio Quadlock (A9 CAN-H, A10 CAN-L, GND, no terminator), firmware
+  `cansniffer_tx`. Restart Claude Code so the MCP server is loaded.
+- Bring VCDS, a multimeter, a thermometer; note odometer, fuel level and outside temperature
+  from the cluster for every block.
+
+**1. Heater: CAN or W-Bus (decides the transport)**
+1. VCDS: read and write down the coding of control unit 18 and of the roof unit (6E); read the
+   fault memory of 18 as the starting point. Do **not** change 18 yet (DTC 02245).
+2. Roof unit 6E: `…02` to `…03`, then set mode "Lüften" and a run time under FERNBED.
+3. Test 1, `radio_impulse("on")`: does the roof unit send `84` by itself and show the run time?
+4. Test 2, `radio_impulse("on", vent_bits=true)`.
+5. Test 3, `set_heater_mode("vent", radio_emulation=true)`.
+6. After each test switch off (`set_heater_mode("off")`), wait 30 s. Ask the user before every
+   transmission; spoofing 0x3E5 needs `enable_status_spoof`.
+7. Read the fault memory of 18 again and compare.
+8. Decision: vent works over CAN, so pure CAN; otherwise choose between CAN without ventilation
+   and pure W-Bus (sender address 2, coding 18 "Funk verbaut").
+
+**2. Heater: open measurements**
+- Meaning of 0x5D3 bit 7 and how the roof unit gets back to `00` (ignition on/off, panel menu).
+- Long-sleep test: after at least 30 min (better overnight), one `set_heater_mode("heat")` frame
+  must wake the bus. Then switch off.
+- Status poll without side effects: repeat the roof unit's current 0x5D3 value as a wake frame
+  and read 0x3E5 for about 1 s.
+
+**3. Drive test on the Komfort-CAN** (protocol in `can-t5-vehicle-signals.md`)
+- Ignition off, on, off; voltage against the multimeter (0x571); engine start and 2000 rpm.
+- Doors, lights, turn signals, reverse gear (0x470).
+- Steady 30, 50 and 80 km/h against GPS: find speed (0x351/0x320) and RPM (0x353).
+- Coasting: lift off in gear, declutch, brake; mark every step with `mark_event`.
+- Odometer 0x65D is confirmed (296 314 km), outside temperature 0x527 still needs a reference.
+- Decide the overrun detection: rule from speed/RPM/deceleration, or a second sniffer on the
+  Antrieb-CAN (listen-only).
+
+**4. Board battery**
+- Photo and type of the separation relay, its control wire (D+ or terminal 75X) and fuse.
+- Record 0x571 together with the multimeter and a clamp meter on the board battery line, and
+  check whether 0x570, 0x578 or 0x392 ever show up.
+
+**5. Firmware, once the transport is decided**
+- Flash the receiver (`env:receiver`, CAN) and the sender, check the stack watermarks and the
+  free heap with BLE, WiFi, MQTT and LoRa running together, and check that LoRa timing does not
+  shift.
+- The receiver uses 99.6 % of the OTA slot (1 305 177 of 1 310 720 bytes). Before adding
+  features, switch the partition table to `min_spiffs.csv` (1.9 MB per slot) or shrink the image.
+- Test BLE pairing with a phone, the automatic reconnect of the PWA (Chrome on Android) and the
+  PWA against both roles (`Webasto-RX-XXXX`, `Webasto-TX-XXXX`).
+- Fit the interior sensor (DS18B20) and test the climate control with the heater.
+- Fail-safe relay for charging in overrun (NC contact, minimum on/off time, engine qualifier).
+
 ## Open
 
 1. **0x5D3 bit 7:** what it means, what set it, and how to get back to `00`. Candidates:

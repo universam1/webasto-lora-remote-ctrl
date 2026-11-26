@@ -26,9 +26,33 @@ Branch `worktree-phase-d`. Protocol is **v5 (magic 0x35)**: flash sender and rec
 - **Non-blocking design**: one FreeRTOS task per hardware (CAN, LoRa, control, network, UI, BLE), communication through queues and snapshot buffers, no `delay()` in the application code. Deep sleep is not supported in this phase.
 - **BLE and PWA**: the receiver exposes a NimBLE GATT service (status, command, result; bonding with passkey, pairing window 120 s after "BLE koppeln" in the menu). The Android PWA in `pwa/` shows status, history charts (temperatures, power, voltage, fuel), a climate dial and the control buttons. Start it locally with `python3 -m http.server --directory pwa 8000` (Web Bluetooth needs HTTPS or localhost); a demo mode works without a device. Tests: `node --test pwa/test/`.
 
-  BLE naming and auto-connect: each unit advertises a unique, role-aware name built from the last two bytes of its Bluetooth MAC: `Webasto-RX-XXXX` (receiver) and `Webasto-TX-XXXX` (sender), XXXX in uppercase hex (helper `lib/webasto_core/ble_name.h`; the sender does not use BLE yet). Choose the role under Einstellungen, Gerät (default receiver); the chooser then lists only that role. The first pairing needs the chooser once (button "Verbinden"). Afterwards the PWA reconnects by itself without the chooser where the browser supports `navigator.bluetooth.getDevices()` and `watchAdvertisements()` (Chrome on Android, possibly behind the flag `enable-web-bluetooth-new-permissions-backend`); otherwise the button stays. It waits up to 20 s for the device's advertisement, only while the page is visible, and retries on the next visibility change or with "Erneut suchen". A device of the other role is never used, and a wrong-role connection is dropped with a warning.
+  BLE naming and auto-connect: each unit advertises a unique, role-aware name built from the last two bytes of its Bluetooth MAC: `Webasto-RX-XXXX` (receiver) and `Webasto-TX-XXXX` (sender), XXXX in uppercase hex (helper `lib/webasto_core/ble_name.h`). Choose the role under Einstellungen, Gerät (default receiver); the chooser then lists only that role. The first pairing needs the chooser once (button "Verbinden"). Afterwards the PWA reconnects by itself without the chooser where the browser supports `navigator.bluetooth.getDevices()` and `watchAdvertisements()` (Chrome on Android, possibly behind the flag `enable-web-bluetooth-new-permissions-backend`); otherwise the button stays. It waits up to 20 s for the device's advertisement, only while the page is visible, and retries on the next visibility change or with "Erneut suchen". A device of the other role is never used, and a wrong-role connection is dropped with a warning.
 - **Tests**: `tools/run_native_tests.sh` runs the host unit tests (CAN codec and FSM, climate controller, codecs, send policy).
-- **Sender menu**: Heizen, Aus, Klima an, Klima aus, Abfrage. The sender has no BLE yet.
+- **Sender menu**: Heizen, Aus, Klima an, Klima aus, Abfrage, and with BLE also BLE koppeln (pairing window 120 s) and Bindungen loeschen.
+- **Sender over BLE** (`-D ENABLE_BLE=1` in `[env:sender]`, remove it to build without BLE): the sender uses the same GATT profile as the receiver, with role = sender and transport = none in the info characteristic (no heater transport, it relays over LoRa). In the PWA choose the role "Sender" under Einstellungen, Gerät; the device is called `Webasto-TX-XXXX` (the receiver is `Webasto-RX-XXXX`). The name is printed once in the serial log at start. Pairing, bonding and passkey (`-D BLE_PASSKEY=...`, default passkey is flagged in the log) work as on the receiver.
+  - Status: the last status the sender received over LoRa, with the sender's own RSSI/SNR and the age of that status in the link-age field. Before the first LoRa status, all values are unknown and the stale flag is set. The stale flag is also set when the status is older than 3 receiver status intervals (30 s).
+  - Commands: Heat becomes `Start` (with the last run time of the sender), Stop `Stop`, Climate on `ClimateSet` (10..24 C, 10..480 min), Climate off `ClimateOff`, Query `QueryStatus`; each is sent over LoRa with the existing retry/ACK job. Result characteristic: queued, sent, acked, then done or failed (NotAdopted, Unsupported, NoBus and Timeout come from the receiver or the job timeout). While a job runs, further commands get Busy; commands without a LoRa equivalent get Unsupported.
+  - BLE runs in its own task (`bleTask`, core 0); it shares data with the main loop only through a snapshot buffer and two queues (`src/sender/sender_ble.h`), so LoRa timing is unaffected. BLE activity counts as user activity for the keep-alive. Host logic: `lib/webasto_core/sender_ble_map.h`.
+
+
+### PWA screenshot
+
+![PWA overview in demo mode](docs/img/pwa-demo.png)
+
+The overview tab of the Standheizung PWA, taken in demo mode (`?demo=1`), so all values are
+sample data and not measurements. From top to bottom:
+
+- **Header and device card:** connection state and the name of the connected unit
+  (`Webasto-RX-XXXX` or `Webasto-TX-XXXX`), with role and transport, and a button to disconnect.
+- **State tile:** heater state (off, heating, ventilating, run-on) and whether the climate
+  control is active.
+- **Value tiles with sparklines:** interior and outside temperature, heating power in kW,
+  board voltage, coolant temperature, fuel used in the current run (ml) with the rate in l/h,
+  and the odometer.
+- **Command card:** Heizen, Aus and Abfragen, the result of the last command and the age of the
+  last status.
+- **Tab bar:** Übersicht, Klima (target temperature dial), Verlauf (history charts) and
+  Einstellungen (role, clock, demo mode).
 
 ## What’s implemented
 
