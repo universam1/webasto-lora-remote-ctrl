@@ -49,7 +49,7 @@
     p.resolve({ ok: ok, text: text, result: r || null });
   };
 
-  var WATCH_TIMEOUT_MS = 20000;
+  var WATCH_TIMEOUT_MS = 8000;  // then one direct connect (some platforms deliver no advertisements)
   var MAX_ATTEMPTS = 8; // automatic retries after a failed connect, then wait for a visibility change or the button
   var ROLE_NAME = ['receiver', 'sender'];
 
@@ -142,6 +142,10 @@
     this._watch = null; this._search('idle');
     if (result === 'found') return (await this._open()) ? 'connected' : 'failed';
     if (result === 'cancel') { this._state('Getrennt', 'off'); return 'cancel'; }
+    // No advertisement seen. On Linux/BlueZ (and macOS) Chrome often delivers none for an already
+    // bonded device, although a direct connect works at once (measured 2026-11-27, Chrome 158).
+    // Try one direct connect before reporting "not in range".
+    if (await this._open(true)) return 'connected';
     this.needsResume = true;
     this._search('timeout'); this._state('Gerät nicht in Reichweite', 'off');
     return 'timeout';
@@ -149,13 +153,15 @@
 
   Ble.prototype.cancelSearch = function () { if (this._watch) this._watch.cancel(); };
 
-  Ble.prototype._open = async function () {
+  // quiet: a failed attempt neither reports an error nor schedules a reconnect (used for the
+  // direct-connect fallback after an advertisement watch that saw nothing).
+  Ble.prototype._open = async function (quiet) {
     if (this._opening) return false;
     this._opening = true;
-    try { return await this._openInner(); } finally { this._opening = false; }
+    try { return await this._openInner(!!quiet); } finally { this._opening = false; }
   };
 
-  Ble.prototype._openInner = async function () {
+  Ble.prototype._openInner = async function (quiet) {
     var self = this;
     this._state('Verbinde …', 'busy');
     try {
@@ -192,6 +198,7 @@
         try { if (this.device.gatt.connected) this.device.gatt.disconnect(); } catch (x) { /* ignore */ }
         return false;
       }
+      if (quiet) { this.chr = null; return false; }
       if (this.cb.onError) this.cb.onError('Verbindung fehlgeschlagen: ' + (e && e.message ? e.message : e));
       this._schedule();
       return false;
