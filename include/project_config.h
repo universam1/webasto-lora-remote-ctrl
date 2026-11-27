@@ -226,6 +226,22 @@
 // Copy include/credentials.h.template to include/credentials.h and fill in your credentials
 #include "credentials.h"
 
+// Two additional WPA2-PSK networks (for example a camper router and a phone hotspot).
+// Define them in credentials.h; an empty SSID disables the slot. The manager scans and joins the
+// strongest visible known network, so the order does not matter.
+#ifndef WIFI_PSK1_SSID
+#define WIFI_PSK1_SSID ""
+#endif
+#ifndef WIFI_PSK1_PASSWORD
+#define WIFI_PSK1_PASSWORD ""
+#endif
+#ifndef WIFI_PSK2_SSID
+#define WIFI_PSK2_SSID ""
+#endif
+#ifndef WIFI_PSK2_PASSWORD
+#define WIFI_PSK2_PASSWORD ""
+#endif
+
 // WiFi connection parameters
 #ifndef MQTT_WIFI_TIMEOUT_MS
 #define MQTT_WIFI_TIMEOUT_MS 3000        // Max 3s to connect

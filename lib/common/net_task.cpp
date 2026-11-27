@@ -144,7 +144,20 @@ bool netTaskStart(rt::CommandQueue<rt::Command, 8>& cmdQueue,
                   rt::CommandQueue<rt::CmdEvent, 8>& eventQueue,
                   const rt::SnapshotBuffer<wh::SystemSnapshot>& snapshot) {
   g_ctx = {&cmdQueue, &eventQueue, &snapshot};
-  g_wifi.begin(MQTT_WIFI_SSID, MQTT_WIFI_USERNAME, MQTT_WIFI_PASSWORD, MQTT_WIFI_ANONYMOUS_ID);
+  {
+    // Network 0: WPA2-Enterprise (PEAP). Networks 1 and 2: WPA2-PSK (empty SSID = unused).
+    WiFiManager::Network nets[wsel::kMaxNetworks];
+    nets[0].ssid = MQTT_WIFI_SSID;
+    nets[0].auth = wsel::Auth::Peap;
+    nets[0].user = MQTT_WIFI_USERNAME;
+    nets[0].password = MQTT_WIFI_PASSWORD;
+    nets[0].anonymousId = MQTT_WIFI_ANONYMOUS_ID;
+    nets[1].ssid = WIFI_PSK1_SSID;
+    nets[1].password = WIFI_PSK1_PASSWORD;
+    nets[2].ssid = WIFI_PSK2_SSID;
+    nets[2].password = WIFI_PSK2_PASSWORD;
+    g_wifi.begin(nets, wsel::kMaxNetworks);
+  }
   g_mqtt.begin(MQTT_BROKER, MQTT_PORT, MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD);
   g_mqtt.setRtCommandCallback(onCommand);
 

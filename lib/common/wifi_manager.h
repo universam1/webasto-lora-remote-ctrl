@@ -3,19 +3,35 @@
 #include <WiFi.h>
 #include <esp_wpa2.h>
 
+#include "wifi_select.h"
+
 class WiFiManager {
 public:
   enum State {
     DISCONNECTED,
+    SCANNING,
     CONNECTING,
     CONNECTED,
     FAILED
   };
 
+  // One known network. auth Peap: WPA2-Enterprise PEAP + MSCHAPv2 (user + password),
+  // auth Psk: WPA2-Personal (password only, user ignored). Empty ssid = slot unused.
+  struct Network {
+    const char* ssid = "";
+    wsel::Auth auth = wsel::Auth::Psk;
+    const char* user = "";
+    const char* password = "";
+    const char* anonymousId = "";
+  };
+
   WiFiManager();
 
-  // Initialize WiFi with WPA2 Enterprise credentials
-  void begin(const char* ssid, const char* username, const char* password, 
+  // Up to wsel::kMaxNetworks networks. The manager scans and joins the strongest visible one.
+  void begin(const Network* nets, size_t count);
+
+  // Legacy single PEAP network.
+  void begin(const char* ssid, const char* username, const char* password,
              const char* anonymousId = "");
 
   // Non-blocking state machine (no delay/busy wait). Call from the net task only.
@@ -39,28 +55,32 @@ public:
 
 private:
   State state_;
-  const char* ssid_;
-  const char* username_;
-  const char* password_;
-  const char* anonymousId_;
-  
+  Network nets_[wsel::kMaxNetworks];
+  size_t netCount_;
+  int current_;          // index into nets_, -1 = none
+  uint8_t failedMask_;   // networks that failed since the last successful scan round
+
   uint32_t connectStartMs_;
   uint32_t lastAttemptMs_;
   uint32_t lastConnectedMs_;
-  uint32_t connectTimeoutMs_;
   uint32_t retryIntervalMs_;
+  uint32_t scanStartMs_;
+  bool modeSet_;
 
-  // Fast reconnect optimization
+  // Fast reconnect optimization (only for the network that last connected)
   bool bssidCached_;
+  int cachedNet_;
   uint8_t cachedBssid_[6];
   int32_t cachedChannel_;
 
-  static constexpr uint32_t kDisconnectSettleMs = 100;
-  bool beginPending_;
+  static constexpr uint32_t kScanTimeoutMs = 15000;
+  static volatile uint8_t lastDisconnectReason_;
 
-  void startConnection();
-  void beginAssociation();
+  void startScan();
+  void handleScanResult();
+  void connectTo(int idx);
   void checkConnection();
+  void fail(const char* why);
   void handleDisconnected();
   void cacheBssidInfo();
 
