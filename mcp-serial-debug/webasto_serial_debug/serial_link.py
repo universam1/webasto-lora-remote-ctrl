@@ -15,6 +15,8 @@ import glob
 import logging
 import os
 import re
+import select
+import struct
 import termios
 import threading
 import time
@@ -135,36 +137,133 @@ def resolve_device(device: str) -> tuple[str, str]:
 
 # ---------------------------------------------------------------------- open helpers
 
-def open_no_reset(path: str, baud: int = BAUD, exclusive: bool = True) -> serial.Serial:
-    """Open without toggling EN/IO0: dtr/rts are set False before open() (pyserial applies them
-    during open), and again after open (ignored where the tty has no modem lines, e.g. a pty)."""
-    ser = serial.Serial()
-    ser.port = path
-    ser.baudrate = baud
-    ser.timeout = 0.1
-    ser.write_timeout = 2.0
-    ser.dtr = False
-    ser.rts = False
-    ser.exclusive = exclusive
+class RawPort:
+    """Minimal serial port on a raw fd, used instead of pyserial's open() for real CP2102 ports.
+
+    Why: pyserial's open() clears DTR and RTS with two separate ioctls after the kernel raised both.
+    Between them RTS is high while DTR is low, which is exactly the ESP32 auto-reset pattern
+    (EN low), so every pyserial open reset the TTGO boards (verified 2026-11-27: banner + rst).
+    Here both lines are cleared with ONE TIOCMBIC right after open; both high -> both low keeps
+    EN high. Verified on the sender: no rst, read and write work.
+
+    Offers what SerialLink uses: read(n), write(b), is_open, close(), fileno(), dtr/rts setters."""
+
+    def __init__(self, path: str, baud: int = BAUD, exclusive: bool = True):
+        self.port = path
+        self._fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            self._set_lines(clear=termios.TIOCM_DTR | termios.TIOCM_RTS)  # one ioctl: no reset pulse
+            if exclusive:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as e:
+                    raise PortBusyError(
+                        f"{path} is busy (held by another program, e.g. pio device monitor, another MCP "
+                        "server or a script); close it there first") from e
+            a = termios.tcgetattr(self._fd)
+            a[0] = 0                                                   # iflag: raw
+            a[1] = 0                                                   # oflag
+            a[2] = (termios.CS8 | termios.CREAD | termios.CLOCAL) & ~termios.HUPCL
+            a[3] = 0                                                   # lflag: no echo, no canon
+            speed = getattr(termios, f"B{baud}", termios.B115200)
+            a[4] = a[5] = speed
+            a[6][termios.VMIN] = 0
+            a[6][termios.VTIME] = 0
+            termios.tcsetattr(self._fd, termios.TCSANOW, a)
+            self._set_lines(clear=termios.TIOCM_DTR | termios.TIOCM_RTS)
+        except BaseException:
+            os.close(self._fd)
+            raise
+        self._dtr = False
+        self._rts = False
+        self.is_open = True
+
+    def _set_lines(self, set_: int = 0, clear: int = 0) -> None:
+        try:
+            if clear:
+                fcntl.ioctl(self._fd, termios.TIOCMBIC, struct.pack("I", clear))
+            if set_:
+                fcntl.ioctl(self._fd, termios.TIOCMBIS, struct.pack("I", set_))
+        except OSError:
+            pass  # a pty has no modem lines
+
+    @property
+    def dtr(self) -> bool:
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, on: bool) -> None:
+        self._dtr = bool(on)
+        self._set_lines(set_=termios.TIOCM_DTR if on else 0, clear=0 if on else termios.TIOCM_DTR)
+
+    @property
+    def rts(self) -> bool:
+        return self._rts
+
+    @rts.setter
+    def rts(self, on: bool) -> None:
+        self._rts = bool(on)
+        self._set_lines(set_=termios.TIOCM_RTS if on else 0, clear=0 if on else termios.TIOCM_RTS)
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def read(self, n: int = 1) -> bytes:
+        if not self.is_open:
+            raise serial.SerialException("port not open")
+        r, _, _ = select.select([self._fd], [], [], 0.1)
+        if not r:
+            return b""
+        try:
+            data = os.read(self._fd, n)
+        except BlockingIOError:
+            return b""
+        if not data:  # readable but nothing: the USB device went away (same text as pyserial)
+            raise serial.SerialException(
+                "device reports readiness to read but returned no data "
+                "(device disconnected or multiple access on port?)")
+        return data
+
+    def write(self, data: bytes) -> int:
+        if not self.is_open:
+            raise serial.SerialException("port not open")
+        view = memoryview(data); sent = 0; deadline = time.monotonic() + 2.0
+        while sent < len(view):
+            try:
+                sent += os.write(self._fd, view[sent:])
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise serial.SerialTimeoutException("write timeout")
+                select.select([], [self._fd], [], 0.1)
+        return sent
+
+    def reset_input_buffer(self) -> None:
+        termios.tcflush(self._fd, termios.TCIFLUSH)
+
+    def flush(self) -> None:
+        """Wait until written data left the tty (pyserial compatible)."""
+        try:
+            termios.tcdrain(self._fd)
+        except termios.error:
+            pass
+
+    def close(self) -> None:
+        if self.is_open:
+            self.is_open = False
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+
+
+def open_no_reset(path: str, baud: int = BAUD, exclusive: bool = True) -> RawPort:
+    """Open without toggling EN/IO0 (see RawPort for why pyserial's open() is not used)."""
+    port = RawPort(path, baud, exclusive)
     try:
-        ser.open()
-    except serial.SerialException as e:
-        if e.errno in (errno.EBUSY, errno.EAGAIN, errno.EWOULDBLOCK) or "exclusively lock" in str(e):
-            raise PortBusyError(
-                f"{path} is busy (held by another program, e.g. pio device monitor, another MCP server "
-                "or a script); close it there first"
-            ) from e
-        raise
-    try:
-        fcntl.ioctl(ser.fileno(), termios.TIOCEXCL)
+        fcntl.ioctl(port.fileno(), termios.TIOCEXCL)
     except OSError as e:
         logger.info("TIOCEXCL not supported on %s (%s); flock only", path, e)
-    try:
-        ser.dtr = False
-        ser.rts = False
-    except OSError as e:
-        logger.info("could not set DTR/RTS on %s: %s", path, e)
-    return ser
+    return port
 
 
 def close_port(ser: serial.Serial | None) -> None:
