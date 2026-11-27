@@ -55,12 +55,12 @@ ALIASES: dict[str, Alias] = {
     ),
     "sender": Alias(
         "sender", ("/dev/ttyWEBASTOSEND", "/dev/ttyUSB0"),
-        "LoRa sender / remote (TTGO LoRa32, CP2102, USB path 1.2; fallback /dev/ttyUSB0 if it is a "
+        "LoRa sender / remote (TTGO LoRa32, CP2102, USB path 1.1; fallback /dev/ttyUSB0 if it is a "
         "CP2102 not claimed by another alias)",
         mac="30:ae:a4:37:89:f0", ble_name="Webasto-TX-89F2",
     ),
     "simulator": Alias(
-        "simulator", ("/dev/ttyWEBASTOSIM",), "W-BUS simulator (ESP32, CP2102, USB path 1.1)",
+        "simulator", ("/dev/ttyWEBASTOSIM",), "W-BUS simulator (ESP32, CP2102, USB path 1.2)",
     ),
     "cansniffer": Alias(
         "cansniffer", ("/dev/ttyCANSNIFF",), "CAN sniffer (ESP32-S2 native USB CDC, 303a:80c2)",
