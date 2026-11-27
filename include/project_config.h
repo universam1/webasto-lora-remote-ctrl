@@ -88,6 +88,15 @@
 #define LORA_CR 7
 #define LORA_TX_POWER_BOOST 1
 #endif
+// Maximum range experiment: SF12 / BW125 / CR4/5. About 2.5 dB more sensitivity than SF11 (-137 dBm),
+// but airtime is 1.65 s for a status and 1.16 s for a command, so a status every 15 s is about 11 %
+// duty cycle (the 10 % limit of the 433 MHz band is exceeded in bursts; the system transmits rarely).
+// CR4/5 instead of 4/7 saves 20 % airtime. The low data rate flag is set by the library (symbol 32.8 ms).
+#ifdef LORA_RANGE_MAX
+#define LORA_BW 125E3
+#define LORA_SF 12
+#define LORA_CR 5
+#endif
 #ifdef LORA_RANGE_EXTREME
 #define LORA_BW 125E3
 #define LORA_SF 12
@@ -116,9 +125,20 @@
 #endif
 
 #ifndef LORA_TX_POWER_BOOST
-// Enable TX power boost (20 dBm PA_OUTPUT_PA_BOOST_PIN) for improved range.
-// Set to 1 to enable, 0 to disable. Default: 0
+// Kept for the older profiles: 1 = 20 dBm at the PA_BOOST pin. Ignored when LORA_TX_POWER_DBM is set.
 #define LORA_TX_POWER_BOOST 0
+#endif
+
+#ifndef LORA_TX_POWER_DBM
+// TX power in dBm at the PA_BOOST pin (the TTGO LoRa32 antenna is connected to PA_BOOST), 2..20.
+// Without an explicit value: 20 with LORA_TX_POWER_BOOST, otherwise 17 (the library default).
+// Legal limit in the 433.05..434.79 MHz band: 10 mW ERP = 12.15 dBm EIRP, so 10 dBm with a
+// 0..2 dBi antenna. 20 dBm would be 61..97 mW ERP.
+#if LORA_TX_POWER_BOOST
+#define LORA_TX_POWER_DBM 20
+#else
+#define LORA_TX_POWER_DBM 17
+#endif
 #endif
 
 // -------------------------

@@ -161,9 +161,25 @@ The simulator responds to the receivers existing requests:
 
 Set your region’s band in `platformio.ini`:
 
-- `-D LORA_FREQUENCY_HZ=433E6` or `868E6` or `915E6`
+- `-D LORA_FREQUENCY_HZ=433175000` (433.175 MHz, the default), or `868E6` / `915E6` for other boards
 
 Both sender and receiver must match.
+
+### Radio profile and power (433 MHz band, Germany)
+
+- **Band:** the general assignment for short range devices covers 433.05 to 434.79 MHz at 10 mW
+  ERP and at most 10 % duty cycle (Bundesnetzagentur Vfg. 91/2025). With BW125 the default
+  433.175 MHz occupies 433.1125 to 433.2375 MHz, inside the band. The former 433.000 MHz was
+  half outside.
+- **Power:** `-D LORA_TX_POWER_DBM=10` (default in `platformio.ini`) is 9.7 mW ERP with a 2 dBi
+  antenna. 20 dBm would be 61 to 97 mW ERP, about six to ten times the limit.
+- **Profile:** `-D LORA_RANGE_MAX=1` selects SF12 / BW125 / CR4/5 for the maximum range
+  experiment (about 2.5 dB more sensitivity than SF11). Airtime: command 1.16 s, status 1.65 s,
+  ping 0.99 s, pong 1.16 s. A status every 15 s is about 11 % duty cycle, so the 10 % limit is
+  exceeded in bursts while the heater runs; the system transmits rarely. Other profiles:
+  `LORA_RANGE_LONG` (SF11, CR4/7), `LORA_RANGE_SHORT` (SF7). The profile must be the same on
+  both boards.
+- **Range test:** at this profile one ping takes 12.7 s (timeout 3.4 s, interval from the airtime).
 
 ## Sender usage
 
@@ -187,7 +203,7 @@ Measures the LoRa range without touching the heater. Start it with the menu item
   trip time.
 - The interval follows from the radio profile: at least 11 times the longest airtime (10 % duty
   cycle in the 433 MHz band), and long enough for the pong to arrive. At SF11 that is about 7.5 s
-  per ping.
+  per ping, at SF12 about 12.7 s.
 - The OLED shows pings sent, answered and lost, the loss in percent, and the last RSSI/SNR of
   both directions. The serial log has one line per ping, and `pingstop` (or the menu) prints min,
   average and max of RSSI, SNR and round trip time.
@@ -282,7 +298,7 @@ Edit `include/project_config.h`:
 
 ### ✅ System Configuration
 - **LoRa Frequency**: 433 MHz (TTGO boards are 433 MHz antenna variants)
-- **LoRa Parameters**: BW=125kHz, SF=7, CR=4/5, Sync=0x12
+- **LoRa Parameters** (when this test ran): BW=125kHz, SF=7, CR=4/5, Sync=0x12. The default is now SF12, CR4/5, 433.175 MHz, 10 dBm (see "Radio profile and power").
 - **LoRa Security**: AES-128-CTR encryption (hardware-accelerated)
 - **W-BUS Baud**: 2400, 8E1 (even parity)
 - **Hardware**: 2x TTGO LoRa32-OLED V1.0 + 1x ESP32 Dev Module simulator

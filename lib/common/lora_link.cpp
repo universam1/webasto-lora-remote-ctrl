@@ -18,7 +18,7 @@ uint32_t LoRaLink::txStartMs = 0;
 // and returns. onReceive() and onTxDone() attach the same DIO0 interrupt, and handleDio0Rise() dispatches on
 // the IRQ flags (RxDone -> _onReceive, TxDone -> _onTxDone). LoRa.receive() maps DIO0 back to RxDone, so the
 // radio must be re-armed with receive() after every TX. That is done in service(), not in the ISR (SPI access).
-static const uint32_t kTxTimeoutMs = 4000;  // lost TxDone IRQ: SF11/BW125 airtime of the largest packet is ~1.1 s
+static const uint32_t kTxTimeoutMs = 4000;  // lost TxDone IRQ: airtime of the largest packet is ~1.65 s at SF12/BW125/CR4-5, 2.2 s at CR4-8
 
 #if defined(ARDUINO_ARCH_ESP32)
 #define LORA_ISR_ATTR IRAM_ATTR
@@ -104,10 +104,9 @@ bool LoRaLink::begin() {
   LoRa.setCodingRate4(LORA_CR);
   LoRa.enableCrc();
 
-  // TX power boost for improved range
-  #if LORA_TX_POWER_BOOST
-  LoRa.setTxPower(20, PA_OUTPUT_PA_BOOST_PIN);
-  #endif
+  // TX power at the PA_BOOST pin (the board's antenna is wired to it). Always set explicitly.
+  LoRa.setTxPower(LORA_TX_POWER_DBM, PA_OUTPUT_PA_BOOST_PIN);
+  Serial.printf("[LORA] TX power %d dBm (PA_BOOST)\n", (int)LORA_TX_POWER_DBM);
 
   // Put radio into continuous receive mode
   LoRa.receive();
