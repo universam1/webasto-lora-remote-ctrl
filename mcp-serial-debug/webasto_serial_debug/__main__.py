@@ -1,11 +1,11 @@
-"""Main entry point for the MCP server"""
+"""Entry point: python -m webasto_serial_debug (stdio MCP server)."""
 
 import asyncio
-from .server import serve
 
 
 def main():
-    """Run the MCP server"""
+    from .server import serve
+
     asyncio.run(serve())
 
 

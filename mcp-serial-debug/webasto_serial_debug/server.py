@@ -1,383 +1,276 @@
-"""
-MCP Server for Webasto Serial Device Debugging
+"""MCP server for debugging the Webasto ESP32 boards over USB serial and BLE.
 
-Provides tools to connect, monitor, and interact with ESP32 devices over serial.
+Serial: attach without resetting the board, background ring buffer, grep/since reads,
+commands with wait-for-regex, reset with boot capture, health summary.
+BLE: scan, pair (BlueZ agent with passkey), read/decode info + status, commands with result
+stages, status watch.
 """
+
+from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import threading
+import re
+import sys
 import time
-from typing import Dict, Optional
-from contextlib import asynccontextmanager
+from typing import Any
 
-import serial
-from serial.tools import list_ports
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.server.fastmcp import FastMCP
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+from . import ble as B
+from .serial_link import SerialManager, analyze, fmt_lines, select_lines
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("webasto-serial-debug")
 
-# Device aliases
-DEVICE_ALIASES = {
-    "simulator": "/dev/ttyWEBASTOSIM",
-    "sender": "/dev/ttyWEBASTOSEND",
-    "receiver": "/dev/ttyWEBASTORECV",
-}
+serial_mgr = SerialManager()
+ble_tool = B.BleTool()
 
-# Active serial connections
-connections: Dict[str, serial.Serial] = {}
+mcp = FastMCP(
+    "webasto-device-debug",
+    instructions=(
+        "Debug the Webasto ESP32 boards (receiver, sender, simulator). Serial: attach opens WITHOUT "
+        "resetting the board; read_log/send_command/health work on a background buffer. Call detach_all "
+        "before flashing with PlatformIO or opening a port elsewhere. BLE: ble_scan, ble_pair (needs the "
+        "device's pairing window open: menu 'BLE koppeln'), ble_read, ble_command, ble_watch. The CAN "
+        "sniffer is handled by the webasto-can-capture server."
+    ),
+)
 
 
-class SerialDeviceManager:
-    """Manages serial device connections with background reading"""
+def _j(obj: Any) -> str:
+    return json.dumps(obj, indent=1, ensure_ascii=False, default=str)
 
-    def __init__(self):
-        self.connections: Dict[str, serial.Serial] = {}
-        self.read_buffers: Dict[str, list] = {}
-        self.buffer_locks: Dict[str, threading.Lock] = {}
-        self.reader_threads: Dict[str, threading.Thread] = {}
-        self.reader_running: Dict[str, bool] = {}
-        self.buffer_max_lines = 2000
 
-    def _reader_thread(self, device: str):
-        """Background thread that continuously reads from serial port"""
-        logger.info(f"[{device}] Reader thread started")
-        while self.reader_running.get(device, False):
-            try:
-                ser = self.connections.get(device)
-                if ser is None or not ser.is_open:
-                    break
-                
-                if ser.in_waiting > 0:
-                    line = ser.readline().decode('utf-8', errors='replace').strip()
-                    if line:
-                        with self.buffer_locks[device]:
-                            self.read_buffers[device].append(line)
-                            # Keep buffer size manageable
-                            while len(self.read_buffers[device]) > self.buffer_max_lines:
-                                self.read_buffers[device].pop(0)
-                else:
-                    time.sleep(0.01)  # Small sleep to avoid busy waiting
-            except Exception as e:
-                if self.reader_running.get(device, False):
-                    logger.error(f"[{device}] Reader error: {e}")
+async def _run(fn, *args) -> str:
+    try:
+        res = await asyncio.to_thread(fn, *args)
+        return res if isinstance(res, str) else _j(res)
+    except Exception as e:
+        logger.warning("tool error: %s", e)
+        return f"Error: {e}"
+
+
+def _held_note(link) -> str:
+    extra = []
+    if link.read_errors:
+        extra.append(f"read errors so far: {link.read_errors}, reopens {link.reopens}")
+    if link.port_lost:
+        extra.append(f"PORT LOST, retrying ({link.last_error})")
+    return ("; ".join(extra) + "\n") if extra else ""
+
+
+# ---------------------------------------------------------------------- serial tools
+
+@mcp.tool()
+async def list_devices() -> str:
+    """List the known boards (receiver, sender, simulator, cansniffer) with resolved port, USB path,
+    presence, VID:PID and whether this server holds the port open, plus any other ttyUSB/ttyACM.
+    Does not open any port. The CAN sniffer is only listed; use the webasto-can-capture server for it."""
+    return await _run(serial_mgr.list_devices)
+
+
+@mcp.tool()
+async def attach(device: str, reset: bool = False) -> str:
+    """Open a board's serial port (115200) and start buffering its log (last 5000 lines, host timestamps).
+
+    `device`: receiver | sender | simulator, or a /dev path. By default the board is NOT reset: DTR and
+    RTS are released before open(), so EN/IO0 stay high. `reset=True` pulses EN after opening and the
+    boot log lands in the buffer. Attaching an already attached device is a no-op (or just resets).
+    The port is held exclusively until detach/detach_all, so flashing or `pio device monitor` fail
+    meanwhile."""
+
+    def work():
+        link, new = serial_mgr.attach(device, reset)
+        time.sleep(0.5 if not reset else 1.5)
+        lines = link.snapshot()
+        head = (f"{link.label}: {'attached' if new else 'already attached'} {link.path}"
+                f"{' (reset)' if reset else ' (no reset)'}; {len(lines)} lines buffered\n")
+        return head + _held_note(link) + fmt_lines(lines[-20:])
+
+    return await _run(work)
+
+
+@mcp.tool()
+async def detach(device: str) -> str:
+    """Release one board's serial port and stop its reader (the buffer is discarded).
+    Detach before flashing it with PlatformIO (`pio run -t upload`) or opening a serial monitor."""
+    return await _run(serial_mgr.detach, device)
+
+
+@mcp.tool()
+async def detach_all() -> str:
+    """Release every serial port this server holds. Call this before flashing any board with PlatformIO
+    or before another program needs the ports."""
+    return await _run(lambda: "\n".join(serial_mgr.detach_all()))
+
+
+@mcp.tool()
+async def read_log(device: str, lines: int = 50, since_s: float | None = None, grep: str | None = None) -> str:
+    """Return buffered log lines of an attached board (attaches without reset if needed).
+
+    `lines`: at most this many of the newest matching lines (0 = all). `since_s`: only lines received
+    in the last N seconds. `grep`: Python regex filter, e.g. `\\[(WiFi|MQTT)\\]` or `seq=4`.
+    Each line is prefixed with its age, e.g. `[-  3.20s]`. Lines starting `[mcp]` are notes from this
+    server (resets, reconnects)."""
+
+    def work():
+        link = serial_mgr.get(device)
+        if grep:
+            re.compile(grep)
+        all_lines = link.snapshot()
+        sel = select_lines(all_lines, lines, since_s, grep)
+        head = f"{link.label} {link.path}: {len(sel)} of {len(all_lines)} buffered lines\n"
+        return head + _held_note(link) + (fmt_lines(sel) or "(no matching lines)")
+
+    return await _run(work)
+
+
+@mcp.tool()
+async def send_command(device: str, text: str, wait_for: str | None = None, timeout_s: float = 10) -> str:
+    """Write one line (newline appended) to the board. With `wait_for` (regex), wait until a NEW line
+    matches and return it together with all lines received in between; otherwise return the lines that
+    arrived within ~1.5 s.
+
+    Sender commands: start | stop | run <min> | climate <C> <min> | climateoff | query. Typical waits:
+    `\\[JOB\\] done` (job finished, shows `ok`/failure), `\\[LORA\\] recv`."""
+
+    def work():
+        link = serial_mgr.get(device)
+        rx = re.compile(wait_for) if wait_for else None
+        start = link.seq
+        link.write_line(text)
+        if rx is None:
+            time.sleep(1.5)
+            got = [ln for ln in link.lines_after(start)]
+            return f"sent {text!r} to {link.label}; {len(got)} lines since:\n" + (fmt_lines(got) or "(none)")
+        hit = link.wait_for(rx, start, timeout_s)
+        got = [ln for ln in link.lines_after(start) if hit is None or ln.seq <= hit.seq]
+        if hit is None:
+            return (f"sent {text!r} to {link.label}; TIMEOUT after {timeout_s:.0f} s, no line matched "
+                    f"/{wait_for}/. {len(got)} lines received:\n" + (fmt_lines(got[-80:]) or "(none)"))
+        return (f"sent {text!r} to {link.label}; matched: {hit.text}\n{len(got)} lines up to the match:\n"
+                + fmt_lines(got[-80:]))
+
+    return await _run(work)
+
+
+@mcp.tool()
+async def reset_device(device: str, wait_for: str | None = None, timeout_s: float = 15) -> str:
+    """Reset the board (EN pulse via RTS, DTR low so it boots normally) and capture the boot log.
+    Attaches if needed. Without `wait_for`, returns the first ~40 lines after the reset. With
+    `wait_for` (regex, e.g. `WEBASTO LORA RECEIVER` or `\\[WiFi\\] Connected`), waits for it and
+    returns everything up to the match."""
+
+    def work():
+        link = serial_mgr.get(device)
+        start = link.seq
+        link.reset()
+        if wait_for:
+            hit = link.wait_for(re.compile(wait_for), start, timeout_s)
+            got = [ln for ln in link.lines_after(start) if hit is None or ln.seq <= hit.seq]
+            status = f"matched: {hit.text}" if hit else f"TIMEOUT after {timeout_s:.0f} s waiting for /{wait_for}/"
+            return f"{link.label} reset; {status}\n" + fmt_lines(got[-120:])
+        deadline = time.monotonic() + timeout_s
+        got = []
+        while time.monotonic() < deadline:
+            got = [ln for ln in link.lines_after(start) if not ln.text.startswith("[mcp]")]
+            if len(got) >= 40:
                 break
-        logger.info(f"[{device}] Reader thread stopped")
+            time.sleep(0.2)
+        if not got:
+            return f"{link.label} reset; no output within {timeout_s:.0f} s (powered? right port?)"
+        return f"{link.label} reset; first {min(40, len(got))} boot lines:\n" + fmt_lines(got[:40])
 
-    def list_devices(self) -> list[dict]:
-        """List available Webasto devices"""
-        import os
-        devices = []
-        for alias, path in DEVICE_ALIASES.items():
-            try:
-                # Check if device exists (symlink or direct path)
-                exists = os.path.exists(path)
-                
-                connected = alias in self.connections and self.connections[alias].is_open
-                devices.append({
-                    "alias": alias,
-                    "path": path,
-                    "exists": exists,
-                    "connected": connected,
-                })
-            except Exception as e:
-                logger.error(f"Error checking device {alias}: {e}")
-                devices.append({
-                    "alias": alias,
-                    "path": path,
-                    "exists": False,
-                    "connected": False,
-                    "error": str(e)
-                })
-        return devices
+    return await _run(work)
 
-    def connect(self, device: str, baud_rate: int = 115200, timeout: float = 0.1) -> str:
-        """Connect to a device and start background reader"""
-        if device in self.connections and self.connections[device].is_open:
-            return f"Already connected to {device}"
 
-        path = DEVICE_ALIASES.get(device, device)
-        
-        try:
-            ser = serial.Serial(
-                port=path,
-                baudrate=baud_rate,
-                timeout=timeout,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-            )
-            self.connections[device] = ser
-            self.read_buffers[device] = []
-            self.buffer_locks[device] = threading.Lock()
-            
-            # Start background reader thread
-            self.reader_running[device] = True
-            thread = threading.Thread(target=self._reader_thread, args=(device,), daemon=True)
-            thread.start()
-            self.reader_threads[device] = thread
-            
-            logger.info(f"Connected to {device} at {path} ({baud_rate} baud)")
-            return f"Connected to {device} at {path} ({baud_rate} baud) - background reader started"
-        except Exception as e:
-            logger.error(f"Failed to connect to {device}: {e}")
-            raise Exception(f"Failed to connect to {device}: {e}")
+@mcp.tool()
+async def health(device: str, window_s: float = 60) -> str:
+    """Summarize an attached board's buffered log: boots/resets (`rst:` lines and boot banners) and crash
+    lines (Guru Meditation, Backtrace, abort, brownout) within `window_s`, last WiFi and MQTT state,
+    last `[rt] stack` watermark per task, failed tasks, recent error lines, plus serial read errors and
+    reconnects of this server's reader."""
 
-    def disconnect(self, device: str) -> str:
-        """Disconnect from a device and stop background reader"""
-        if device not in self.connections:
-            return f"Not connected to {device}"
-
-        try:
-            # Stop background reader
-            self.reader_running[device] = False
-            if device in self.reader_threads:
-                self.reader_threads[device].join(timeout=1.0)
-                del self.reader_threads[device]
-            
-            self.connections[device].close()
-            del self.connections[device]
-            if device in self.read_buffers:
-                del self.read_buffers[device]
-            if device in self.buffer_locks:
-                del self.buffer_locks[device]
-            logger.info(f"Disconnected from {device}")
-            return f"Disconnected from {device}"
-        except Exception as e:
-            logger.error(f"Error disconnecting from {device}: {e}")
-            raise Exception(f"Error disconnecting from {device}: {e}")
-
-    def read(self, device: str, lines: int = 50) -> str:
-        """Read buffered data from device (background thread collects data)"""
-        if device not in self.connections:
-            raise Exception(f"Not connected to {device}")
-
-        try:
-            with self.buffer_locks[device]:
-                buffer = self.read_buffers.get(device, [])
-                recent = buffer[-lines:] if len(buffer) > lines else buffer[:]
-            
-            if not recent:
-                return f"No data available from {device}"
-            
-            return "\n".join(recent)
-        except Exception as e:
-            logger.error(f"Error reading from {device}: {e}")
-            raise Exception(f"Error reading from {device}: {e}")
-
-    def write(self, device: str, data: str) -> str:
-        """Write data to device"""
-        if device not in self.connections:
-            raise Exception(f"Not connected to {device}")
-
-        ser = self.connections[device]
-        try:
-            # Ensure newline at end
-            if not data.endswith('\n'):
-                data += '\n'
-            
-            written = ser.write(data.encode('utf-8'))
-            ser.flush()
-            logger.info(f"Wrote {written} bytes to {device}")
-            return f"Wrote {written} bytes to {device}"
-        except Exception as e:
-            logger.error(f"Error writing to {device}: {e}")
-            raise Exception(f"Error writing to {device}: {e}")
-
-    def get_status(self, device: str) -> dict:
-        """Get device status"""
-        path = DEVICE_ALIASES.get(device, device)
-        connected = device in self.connections and self.connections[device].is_open
-        
-        status = {
-            "device": device,
-            "path": path,
-            "connected": connected,
+    def work():
+        link = serial_mgr.get(device)
+        rep = analyze(link.snapshot(), window_s)
+        rep = {
+            "device": link.label, "path": link.path,
+            "attached_for_s": round(time.monotonic() - link.attached_at, 1),
+            "serial": {"bytes_rx": link.bytes_rx, "read_errors": link.read_errors, "reopens": link.reopens,
+                       "port_lost": link.port_lost, "last_error": link.last_error or None,
+                       "resets_by_tool": link.resets_by_tool},
+            **rep,
         }
+        return _j(rep)
 
-        if connected:
-            ser = self.connections[device]
-            with self.buffer_locks.get(device, threading.Lock()):
-                buffer_lines = len(self.read_buffers.get(device, []))
-            status.update({
-                "baud_rate": ser.baudrate,
-                "timeout": ser.timeout,
-                "in_waiting": ser.in_waiting,
-                "buffer_lines": buffer_lines,
-                "reader_active": self.reader_running.get(device, False),
-            })
-
-        return status
+    return await _run(work)
 
 
-# Global device manager
-device_manager = SerialDeviceManager()
+# ---------------------------------------------------------------------- BLE tools
+
+@mcp.tool()
+async def ble_scan(timeout_s: float = 8) -> str:
+    """Scan for Webasto BLE devices (name prefix `Webasto-` or the profile's service UUID). Returns address,
+    name, RSSI and whether this PC holds a bond, plus bonded Webasto devices that are not advertising
+    (a device stops advertising while a phone/PWA is connected)."""
+    t = max(1.0, min(float(timeout_s), 30.0))
+    return _j(await B.guarded(ble_tool.scan(t), t + 20))
 
 
-async def serve():
-    """Run the MCP server"""
-    server = Server("webasto-serial-debug")
+@mcp.tool()
+async def ble_pair(name_or_address: str, passkey: int | None = None) -> str:
+    """Pair (bond) this PC with a board. The device only accepts a NEW bond while its pairing window is
+    open: on the device, open the menu 'BLE koppeln' (120 s) first, otherwise it drops the link right
+    after pairing. `name_or_address`: receiver | sender, a BLE name (Webasto-RX-89CA), a unique part of
+    it, or a MAC. Passkey: parameter, else env WEBASTO_BLE_PASSKEY, else BLE_PASSKEY from
+    include/credentials.h, else the firmware default 123456. A BlueZ agent (KeyboardOnly) answers the
+    passkey request; it is registered once per server process. Returns ok or the failure reason; a
+    half-made bond is removed again."""
+    return _j(await B.guarded(ble_tool.pair(name_or_address, passkey), 90))
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        """List available tools"""
-        return [
-            Tool(
-                name="list_devices",
-                description="List available Webasto serial devices (simulator, sender, receiver)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
-            ),
-            Tool(
-                name="connect_device",
-                description="Connect to a Webasto device for serial communication",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "device": {
-                            "type": "string",
-                            "description": "Device alias (simulator, sender, receiver) or full path",
-                            "enum": ["simulator", "sender", "receiver"],
-                        },
-                        "baud_rate": {
-                            "type": "integer",
-                            "description": "Baud rate (default: 115200)",
-                            "default": 115200,
-                        },
-                    },
-                    "required": ["device"],
-                },
-            ),
-            Tool(
-                name="disconnect_device",
-                description="Disconnect from a Webasto device",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "device": {
-                            "type": "string",
-                            "description": "Device alias (simulator, sender, receiver)",
-                            "enum": ["simulator", "sender", "receiver"],
-                        },
-                    },
-                    "required": ["device"],
-                },
-            ),
-            Tool(
-                name="read_serial",
-                description="Read serial output from a connected device (returns last N lines from buffer)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "device": {
-                            "type": "string",
-                            "description": "Device alias (simulator, sender, receiver)",
-                            "enum": ["simulator", "sender", "receiver"],
-                        },
-                        "lines": {
-                            "type": "integer",
-                            "description": "Number of lines to return (default: 50)",
-                            "default": 50,
-                        },
-                    },
-                    "required": ["device"],
-                },
-            ),
-            Tool(
-                name="write_serial",
-                description="Write data to a connected device",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "device": {
-                            "type": "string",
-                            "description": "Device alias (simulator, sender, receiver)",
-                            "enum": ["simulator", "sender", "receiver"],
-                        },
-                        "data": {
-                            "type": "string",
-                            "description": "Data to send (newline will be appended automatically)",
-                        },
-                    },
-                    "required": ["device", "data"],
-                },
-            ),
-            Tool(
-                name="get_device_status",
-                description="Get connection status and configuration for a device",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "device": {
-                            "type": "string",
-                            "description": "Device alias (simulator, sender, receiver)",
-                            "enum": ["simulator", "sender", "receiver"],
-                        },
-                    },
-                    "required": ["device"],
-                },
-            ),
-        ]
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-        """Handle tool calls"""
-        try:
-            if name == "list_devices":
-                devices = device_manager.list_devices()
-                result = "Available Webasto Devices:\n\n"
-                for dev in devices:
-                    status = "🟢 Connected" if dev.get("connected") else ("🟡 Available" if dev.get("exists") else "🔴 Not Found")
-                    result += f"- {dev['alias']}: {dev['path']} - {status}\n"
-                return [TextContent(type="text", text=result)]
+@mcp.tool()
+async def ble_unpair(name_or_address: str) -> str:
+    """Remove the bond (and BlueZ's device entry) for a board on this PC. The device keeps its own bond
+    entry until it is re-paired or cleared on the device."""
+    return _j(await B.guarded(ble_tool.unpair(name_or_address), 20))
 
-            elif name == "connect_device":
-                device = arguments["device"]
-                baud_rate = arguments.get("baud_rate", 115200)
-                result = device_manager.connect(device, baud_rate)
-                return [TextContent(type="text", text=result)]
 
-            elif name == "disconnect_device":
-                device = arguments["device"]
-                result = device_manager.disconnect(device)
-                return [TextContent(type="text", text=result)]
+@mcp.tool()
+async def ble_read(name_or_address: str) -> str:
+    """Connect to a bonded board, read and decode info (role, transport, fw) and status (phase, flags,
+    error code + name, temperatures with "--" for unknown, voltage, odometer, climate session, LoRa
+    rssi/snr/link age, last command id + result name), then disconnect."""
+    return _j(await B.guarded(ble_tool.read(name_or_address), 60))
 
-            elif name == "read_serial":
-                device = arguments["device"]
-                lines = arguments.get("lines", 50)
-                result = device_manager.read(device, lines)
-                return [TextContent(type="text", text=f"=== {device} serial output ===\n{result}")]
 
-            elif name == "write_serial":
-                device = arguments["device"]
-                data = arguments["data"]
-                result = device_manager.write(device, data)
-                return [TextContent(type="text", text=result)]
+@mcp.tool()
+async def ble_command(name_or_address: str, op: str, target_c: int | None = None,
+                      duration_min: int | None = None, timeout_s: float = 25) -> str:
+    """Send a GATT command to a bonded board and follow it. `op`: heat | stop | climate_set | climate_off |
+    query, or 1..5. climate_set needs `target_c` and `duration_min`. Subscribes to result + status,
+    writes [op][cmdId][args], collects result notifications until stage done/failed or `timeout_s`,
+    and returns the stage sequence (queued -> sent -> acked -> done/failed with CmdResult names), the
+    status notifications seen meanwhile and the final decoded status. heat/stop/climate_* really switch
+    the heater."""
+    t = max(2.0, min(float(timeout_s), 120.0))
+    return _j(await B.guarded(ble_tool.command(name_or_address, op, target_c, duration_min, t), t + 60))
 
-            elif name == "get_device_status":
-                device = arguments["device"]
-                status = device_manager.get_status(device)
-                result = f"Device Status for '{device}':\n"
-                for key, value in status.items():
-                    result += f"  {key}: {value}\n"
-                return [TextContent(type="text", text=result)]
 
-            else:
-                raise ValueError(f"Unknown tool: {name}")
+@mcp.tool()
+async def ble_watch(name_or_address: str, seconds: float = 10) -> str:
+    """Subscribe to a bonded board's status notifications for `seconds` (max 120) and return the decoded
+    sequence (the initial read plus every change; consecutive duplicates removed)."""
+    s = max(1.0, min(float(seconds), 120.0))
+    return _j(await B.guarded(ble_tool.watch(name_or_address, s), s + 60))
 
-        except Exception as e:
-            logger.error(f"Error in tool {name}: {e}")
-            return [TextContent(type="text", text=f"Error: {str(e)}")]
 
-    # Run the server
-    from mcp.server.stdio import stdio_server
-
-    async with stdio_server() as (read_stream, write_stream):
-        logger.info("Webasto Serial Debug MCP Server starting...")
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+async def serve() -> None:
+    logger.info("Webasto device debug MCP server starting")
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        serial_mgr.detach_all()
