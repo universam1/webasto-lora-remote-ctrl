@@ -29,6 +29,8 @@ struct Ctx {
   // Activity counters for the LED (uiTask looks at changes).
   std::atomic<uint32_t> loraRxCount{0};
   std::atomic<uint32_t> loraTxCount{0};
+  std::atomic<uint32_t> pingCount{0};  // range test: pings received / pongs sent
+  std::atomic<uint32_t> pongCount{0};
   // Diagnostics (logged by loraTask): result events that could not be delivered.
   std::atomic<uint32_t> eventsDropped{0};      // per-source queue full
   std::atomic<uint32_t> stopEventsDropped{0};  // subset of eventsDropped: events of Stop commands

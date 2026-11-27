@@ -108,6 +108,12 @@ void loraTaskFn(void*) {
   bool forcePending = false;
   uint8_t errOverride = 0;
 
+  // Range test: the Pong for the last Ping. A newer ping replaces an unsent pong. A pong goes out
+  // before any status, so the sender's round trip time stays short.
+  bool pongPending = false;
+  uint16_t pongPingSeq = 0;
+  int8_t pongRssi = 0, pongSnr = 0;
+
   bool everSent = false;
   uint32_t lastTxMs = 0;
   wh::HeaterPhase sentPhase = wh::HeaterPhase::Unknown;
@@ -136,6 +142,18 @@ void loraTaskFn(void*) {
     float s = 0;
     while (g_lora.recv(pkt, r, s)) {
       c.loraRxCount.fetch_add(1);
+      if (pkt.h.type == proto::MsgType::Ping && pkt.h.dst == LORA_NODE_RECEIVER &&
+          pkt.h.src == LORA_NODE_SENDER) {
+        // Range test: answer at once, with the RSSI/SNR of this ping. A ping is not a command: it
+        // does not open the sender-active window and never reaches the heater.
+        pongPending = true;
+        pongPingSeq = pkt.h.seq;
+        pongRssi = (int8_t)r;
+        pongSnr = (int8_t)s;
+        c.pingCount.fetch_add(1);
+        Serial.printf("[lora] ping seq=%u rssi=%d snr=%.1f\n", pkt.h.seq, r, s);
+        continue;
+      }
       if (pkt.h.type != proto::MsgType::Command || pkt.h.dst != LORA_NODE_RECEIVER ||
           pkt.h.src != LORA_NODE_SENDER)
         continue;
@@ -190,8 +208,28 @@ void loraTaskFn(void*) {
     }
     if (c.forceStatus.exchange(false)) forcePending = true;
 
+    // 2b. Range test answer. send() fails while the radio is on air: it is tried again in the next
+    // pass (10 ms); once the sender's timeout has passed the ping counts as lost there anyway.
+    if (pongPending) {
+      proto::Packet po{};
+      po.h.magic_version = proto::kMagicVersion;
+      po.h.type = proto::MsgType::Pong;
+      po.h.src = LORA_NODE_RECEIVER;
+      po.h.dst = LORA_NODE_SENDER;
+      po.h.seq = g_seq;  // own counter (shared with status): the AES-CTR nonce is never reused
+      po.p.pong.pingSeq = pongPingSeq;
+      po.p.pong.rssiDbm = pongRssi;
+      po.p.pong.snrDb = pongSnr;
+      po.crc = proto::calcCrc(po);
+      if (g_lora.send(po)) {
+        g_seq++;
+        pongPending = false;
+        c.pongCount.fetch_add(1);
+      }
+    }
+
     // 3. Status sending according to the send window.
-    if (haveSnap) {
+    if (haveSnap && !pongPending) {
       wh::SendInputs in;
       in.now = now;
       in.everRequested = c.everRequested.load();

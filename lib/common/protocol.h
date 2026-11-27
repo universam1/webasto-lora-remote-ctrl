@@ -30,6 +30,8 @@ enum class MsgType : uint8_t {
   Command = 1,
   Status = 2,
   Ack = 3,
+  Ping = 4,  // Range test, sender -> receiver, no payload (header seq: sender counter, shared with commands)
+  Pong = 5,  // Range test, receiver -> sender, answers a Ping (header seq: receiver counter, shared with status)
 };
 
 enum class CommandKind : uint8_t {
@@ -83,7 +85,16 @@ struct StatusPayload {
   uint8_t climateTargetC;  // 10..24, 0 unknown
 };
 
+// Range test answer. The header seq of a Pong comes from the receiver's own counter (shared with the
+// status packets), so the AES-CTR nonce (seq, src, dst) is never reused; the ping seq travels inside.
+struct PongPayload {
+  uint16_t pingSeq;  // header seq of the ping that is answered
+  int8_t rssiDbm;    // RSSI of that ping as seen by the receiver (uplink)
+  int8_t snrDb;      // SNR of that ping as seen by the receiver (uplink)
+};
+
 static_assert(sizeof(StatusPayload) == 19, "StatusPayload v5 must be 19 bytes");
+static_assert(sizeof(PongPayload) == 4, "PongPayload must be 4 bytes");
 static_assert(sizeof(CommandPayload) == 4, "CommandPayload v5 must be 4 bytes");
 
 // Packet structure with variable-length payload support (Protocol v4)
@@ -95,6 +106,7 @@ struct Packet {
   union {
     CommandPayload cmd;
     StatusPayload status;
+    PongPayload pong;
     uint8_t raw[32];  // Max payload size
   } p;
   uint16_t crc;
@@ -110,6 +122,10 @@ inline size_t getPayloadSize(const Packet& pkt) {
       return sizeof(StatusPayload);   // 19 bytes
     case MsgType::Ack:
       return 0;  // No payload
+    case MsgType::Ping:
+      return 0;  // 8 bytes on air
+    case MsgType::Pong:
+      return sizeof(PongPayload);  // 4 bytes, 12 bytes on air
     default:
       return 0;
   }

@@ -79,7 +79,7 @@ void handleMenu(MenuItem item) {
 
 void drawMenu() {
   const MenuItem selected = g_menu.getSelectedItem();
-  const int selectedIdx = static_cast<int>(selected);
+  const int selectedIdx = g_menu.getSelectedPos();
   const int totalItems = g_menu.getItemCount();
   const int visibleItems = 4;
   const int page = selectedIdx / visibleItems;
@@ -90,7 +90,7 @@ void drawMenu() {
   for (int i = 0; i < visibleItems; i++) {
     const int idx = startIdx + i;
     if (idx < totalItems) {
-      const MenuItem item = static_cast<MenuItem>(idx);
+      const MenuItem item = g_menu.getItemAt(idx);
       g_ui.setLine(1 + i, String(item == selected ? "> " : "  ") + menuItemToStr(item));
     } else {
       g_ui.setLine(1 + i, "");
@@ -164,8 +164,7 @@ void uiTaskFn(void*) {
   for (;;) {
     const uint32_t now = millis();
     // BLE items only while the BLE stack runs (the build flag alone is not enough: begin may fail).
-    g_menu.setItemCount(c.bleOk.load() ? static_cast<uint8_t>(MenuItem::Count)
-                                       : static_cast<uint8_t>(MenuItem::QueryStatus) + 1);
+    g_menu.setVisibleMask(kMenuCommonMask | (c.bleOk.load() ? kMenuBleMask : 0));
     g_menu.update();
     MenuItem activated;
     if (g_menu.isItemActivated(activated)) handleMenu(activated);
@@ -215,7 +214,7 @@ void startUiTask() {
   g_ui.render();
   g_pages.begin(g_ui.display());
   g_menu.begin(MENU_BUTTON_PIN);
-  g_menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // BLE items: see uiTaskFn
+  g_menu.setVisibleMask(kMenuCommonMask);  // BLE items: see uiTaskFn; no range test on the receiver
   rt::TaskSpec spec = {"uiTask", uiTaskFn, rt::kStackUi, 1, 1, nullptr};
   rt::startTask(spec);
 }

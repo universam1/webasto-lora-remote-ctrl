@@ -9,6 +9,7 @@
 #include "menu_handler.h"
 #include "status_codec.h"
 #include "lora_airtime.h"
+#include "range_test.h"
 #include "sender_ble_map.h"
 #if defined(ENABLE_BLE) && ENABLE_BLE
 #include "sender_ble.h"
@@ -308,16 +309,145 @@ static const char *menuLabel(MenuItem item)
   case MenuItem::QueryStatus: return "Abfrage";
   case MenuItem::BlePair: return "BLE koppeln";
   case MenuItem::BleClear: return "Bindungen loesch.";
+  case MenuItem::RangeTest: return "Ping-Pong";
   default: return "-";
   }
 }
 
+// ---- Range test (ping-pong) -------------------------------------------------------------------
+// Menu "Ping-Pong" or serial "ping [n]" / "pingstop". While it runs the OLED shows the live
+// statistics and no heater command is sent: the receiver answers every ping with a pong that
+// carries the RSSI/SNR it measured. The test needs no heater, only two radios.
+static wh::RangeTest gRange;
+static uint16_t gRangeLastPongSeq = 0;
+static uint32_t gRangeShowUntilMs = 0;  // keep the result on the OLED for a while after the test ended
+
+static void rangeStart(uint32_t maxPings)
+{
+  if (jobBusy())
+  {
+    Serial.println("[PING] busy: a command is still running");
+    return;
+  }
+  wh::RangeParams p = wh::rangeParamsFor(
+      LORA_SF, (uint32_t)LORA_BW, LORA_CR,
+      sizeof(proto::PacketHeader) + 2,                               // ping: header + crc
+      sizeof(proto::PacketHeader) + sizeof(proto::PongPayload) + 2);  // pong
+  p.maxPings = maxPings;
+  gRange.start(millis(), p);
+  gRangeShowUntilMs = 0;
+  senderNoteUserActivity();
+  Serial.printf("[PING] start: interval %u ms, timeout %u ms, %s pings\n", (unsigned)p.intervalMs,
+                (unsigned)p.timeoutMs, maxPings ? String(maxPings).c_str() : "unlimited");
+}
+
+static void rangeStop(const char *why)
+{
+  if (!gRange.active())
+    return;
+  gRange.stop();
+  gRangeShowUntilMs = millis() + 20000;  // result stays visible for 20 s
+  const wh::RangeStats &s = gRange.stats();
+  Serial.printf("[PING] %s: sent=%u ok=%u lost=%u late=%u loss=%u.%u%% maxLostStreak=%u\n", why, (unsigned)s.sent,
+                (unsigned)s.ok, (unsigned)s.lost, (unsigned)s.late, (unsigned)(s.lossPermille() / 10),
+                (unsigned)(s.lossPermille() % 10), (unsigned)s.maxLostStreak);
+  if (s.ok)
+    Serial.printf("[PING] uplink rssi min/avg/max=%d/%d/%d snr min/avg=%d/%d | downlink rssi min/avg/max=%d/%d/%d snr min/avg=%d/%d | rtt min/avg/max=%d/%d/%d ms\n",
+                  (int)s.upRssi.min, (int)s.upRssi.avg(), (int)s.upRssi.max, (int)s.upSnr.min, (int)s.upSnr.avg(),
+                  (int)s.downRssi.min, (int)s.downRssi.avg(), (int)s.downRssi.max, (int)s.downSnr.min,
+                  (int)s.downSnr.avg(), (int)s.rttMs.min, (int)s.rttMs.avg(), (int)s.rttMs.max);
+}
+
+// Sender side of the test: transmit the next ping when it is due, give up on a missing pong.
+static void serviceRange(uint32_t now)
+{
+  if (!gRange.active())
+    return;
+  // A heater command has priority: it would collide with the pings on the air.
+  if (jobBusy())
+  {
+    rangeStop("aborted by a command");
+    return;
+  }
+  const wh::RangeTest::Event ev = gRange.poll(now);
+  if (ev == wh::RangeTest::Event::Lost || ev == wh::RangeTest::Event::Finished)
+  {
+    const wh::RangeStats &s = gRange.stats();
+    Serial.printf("[PING] seq lost (timeout), %u in a row, loss %u.%u%%\n", (unsigned)s.lostStreak,
+                  (unsigned)(s.lossPermille() / 10), (unsigned)(s.lossPermille() % 10));
+    if (ev == wh::RangeTest::Event::Finished)
+    {
+      gRangeShowUntilMs = now + 20000;
+      Serial.printf("[PING] finished: sent=%u ok=%u lost=%u\n", (unsigned)s.sent, (unsigned)s.ok, (unsigned)s.lost);
+    }
+    return;
+  }
+  if (gRange.due(now) && !loraLink.txBusy())
+  {
+    proto::Packet pkt{};
+    pkt.h.magic_version = proto::kMagicVersion;
+    pkt.h.type = proto::MsgType::Ping;
+    pkt.h.src = LORA_NODE_SENDER;
+    pkt.h.dst = LORA_NODE_RECEIVER;
+    pkt.h.seq = gSeq;
+    pkt.crc = proto::calcCrc(pkt);
+    if (loraLink.send(pkt))
+    {
+      statusLed.toggle();
+      gRange.onSent(gSeq, now);
+      Serial.printf("[PING] -> seq=%u\n", gSeq);
+      gSeq++;
+      if (gSeq == 0)
+        gSeq = 1;
+    }
+  }
+}
+
+// A pong arrived (called from the receive path).
+static void onPongReceived(const proto::Packet &pkt, int rssi, float snr, uint32_t now)
+{
+  const bool ok = gRange.onPong(pkt.p.pong.pingSeq, pkt.p.pong.rssiDbm, pkt.p.pong.snrDb, rssi, (int)snr, now);
+  Serial.printf("[PING] <- pong for seq=%u %s up rssi=%d snr=%d | down rssi=%d snr=%.1f\n", pkt.p.pong.pingSeq,
+                ok ? "OK" : "(late/stray)", (int)pkt.p.pong.rssiDbm, (int)pkt.p.pong.snrDb, rssi, snr);
+  gRangeLastPongSeq = pkt.p.pong.pingSeq;
+}
+
+static void renderRangeTest(uint32_t now)
+{
+  const wh::RangeStats &s = gRange.stats();
+  ui.drawProgressBar(0, 0, 0.0f);
+  ui.setLine(0, String("PING-PONG ") + (gRange.active() ? (gRange.pending() ? "..." : "") : "(Ende)"));
+  ui.setLine(1, String("Ping ") + String(s.sent) + " ok " + String(s.ok) + " v " + String(s.lost));
+  ui.setLine(2, String("Verlust ") + String(s.lossPermille() / 10) + "." + String(s.lossPermille() % 10) + "%");
+  if (s.ok == 0)
+  {
+    ui.setLine(3, "warte auf Pong");
+    ui.setLine(4, "");
+  }
+  else
+  {
+    ui.setLine(3, String("Hin  ") + String(s.upRssi.last) + "dBm " + String(s.upSnr.last) + "dB");
+    ui.setLine(4, String("Rueck ") + String(s.downRssi.last) + "dBm " + String(s.downSnr.last) + "dB");
+  }
+  if (s.ok == 0)
+    ui.setLine(5, s.lostStreak ? String("Keine Antwort ") + String(s.lostStreak) + "x" : String("Taste: Ende"));
+  else
+    ui.setLine(5, String("RTT ") + String(s.rttMs.last) + "ms min " + String(s.upRssi.min));
+  (void)now;
+  ui.render();
+}
+
 static void renderOled(uint32_t now)
 {
+  if (gRange.active() || (gRangeShowUntilMs != 0 && (int32_t)(gRangeShowUntilMs - now) > 0))
+  {
+    renderRangeTest(now);
+    return;
+  }
   if (menu.getState() == MenuState::Visible)
   {
     MenuItem selected = menu.getSelectedItem();
-    int selectedIdx = static_cast<int>(selected);
+    int selectedIdx = menu.getSelectedPos();
     int totalItems = menu.getItemCount();
     const int visibleItems = 4;
     int page = selectedIdx / visibleItems;
@@ -330,7 +460,7 @@ static void renderOled(uint32_t now)
       int itemIdx = startIdx + i;
       if (itemIdx < totalItems)
       {
-        MenuItem item = static_cast<MenuItem>(itemIdx);
+        MenuItem item = menu.getItemAt(itemIdx);
         String label = menuLabel(item);
         if (item == MenuItem::ClimateOn)
           label += String(" ") + String(gClimateTargetC) + "C " + String(gClimateMinutes) + "m";
@@ -529,6 +659,13 @@ static void handleMenuSelection(MenuItem item)
   case MenuItem::ClimateOn: submit(proto::CommandKind::ClimateSet, gClimateTargetC, gClimateMinutes); break;
   case MenuItem::ClimateOff: submit(proto::CommandKind::ClimateOff, 0, 0); break;
   case MenuItem::QueryStatus: submit(proto::CommandKind::QueryStatus, 0, 0); break;
+  case MenuItem::RangeTest:
+    // Toggle: a second activation ends the test and keeps the result on the display for 20 s.
+    if (gRange.active())
+      rangeStop("stopped by menu");
+    else
+      rangeStart(0);
+    break;
 #if defined(ENABLE_BLE) && ENABLE_BLE
   case MenuItem::BlePair: sbl::shared().pairRequest.store(true); break;
   case MenuItem::BleClear: sbl::shared().clearRequest.store(true); break;
@@ -539,7 +676,26 @@ static void handleMenuSelection(MenuItem item)
 
 static void handleSerialLine(const String &line)
 {
-  if (line.equalsIgnoreCase("stop"))
+  if (line.equalsIgnoreCase("pingstop"))
+  {
+    if (gRange.active())
+      rangeStop("stopped by serial");
+    else
+      Serial.println("[PING] not running");
+  }
+  else if (line.startsWith("ping") || line.startsWith("PING"))
+  {
+    // ping [count]: range test, 0 or no count = until "pingstop" or the menu stops it
+    int space = line.indexOf(' ');
+    long n = space < 0 ? 0 : line.substring(space + 1).toInt();
+    if (n < 0 || n > 100000)
+    {
+      Serial.println("Usage: ping [count 1..100000]  (no count: until pingstop)");
+      return;
+    }
+    rangeStart((uint32_t)n);
+  }
+  else if (line.equalsIgnoreCase("stop"))
   {
     submit(proto::CommandKind::Stop, 0, 0);
   }
@@ -594,7 +750,7 @@ static void handleSerialLine(const String &line)
   }
   else
   {
-    Serial.println("Unknown command. Use: start | stop | run <min> | climate <C> <min> | climateoff | query");
+    Serial.println("Unknown command. Use: start | stop | run <min> | climate <C> <min> | climateoff | query | ping [n] | pingstop");
   }
 }
 
@@ -636,10 +792,9 @@ void setup()
   // Start BLE before the menu is sized: the BLE items (pairing window, clear bonds) need the stack.
   gJobDone = bleJobDone;
   sbl::start(3 * kSenderStatusIntervalMs);
-  menu.setItemCount(sbl::shared().ok.load() ? static_cast<uint8_t>(MenuItem::Count)
-                                            : static_cast<uint8_t>(MenuItem::QueryStatus) + 1);
+  menu.setVisibleMask(kMenuCommonMask | kMenuRangeMask | (sbl::shared().ok.load() ? kMenuBleMask : 0));
 #else
-  menu.setItemCount(static_cast<uint8_t>(MenuItem::QueryStatus) + 1);  // no BLE items
+  menu.setVisibleMask(kMenuCommonMask | kMenuRangeMask);  // no BLE items
 #endif
   Serial.println("[SETUP] Menu button initialized on GPIO0");
 
@@ -671,6 +826,11 @@ static void pumpLoRaRx(uint32_t now)
   if (!loraLink.recv(pkt, rssi, snr))
     return;
   statusLed.toggle();
+  if (pkt.h.type == proto::MsgType::Pong && pkt.h.src == LORA_NODE_RECEIVER && pkt.h.dst == LORA_NODE_SENDER)
+  {
+    onPongReceived(pkt, rssi, snr, now);
+    return;
+  }
   if (pkt.h.type == proto::MsgType::Status && pkt.h.src == LORA_NODE_RECEIVER)
   {
     wh::DecodedStatus st = wh::unpackLoraStatus(pkt.p.status);
@@ -690,7 +850,7 @@ static void serviceKeepalive(uint32_t now)
 {
   static uint32_t lastTryMs = 0;
   static bool tried = false;
-  if (!gUserActive || jobBusy())
+  if (!gUserActive || jobBusy() || gRange.active())
     return;
   const bool statusOld = gStatusRxMs == 0 || (now - gStatusRxMs) > kSenderKeepaliveMs;
   const uint32_t retryMs = gStatusRxMs == 0 ? 60000UL : kSenderKeepaliveMs;
@@ -754,6 +914,7 @@ static void senderLoopOnce()
   serviceBleCommands();
 #endif
   serviceJob(now);
+  serviceRange(now);
   serviceKeepalive(now);
 #if defined(ENABLE_BLE) && ENABLE_BLE
   publishBleSnapshot(now);

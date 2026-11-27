@@ -54,8 +54,7 @@ void MenuHandler::update()
           {
             // Short press: move to next menu item
             selectedItem = static_cast<MenuItem>(
-                (static_cast<uint8_t>(selectedItem) + 1) %
-                itemCount);
+                rt::menuMaskNext(visibleMask, kCount, static_cast<uint8_t>(selectedItem)));
             menuShowTimeMs = now;  // Reset timeout
           }
         }
@@ -103,7 +102,7 @@ void MenuHandler::show()
 {
   currentState = MenuState::Visible;
   menuShowTimeMs = millis();
-  selectedItem = static_cast<MenuItem>(0);  // Reset to first item
+  selectedItem = static_cast<MenuItem>(rt::menuMaskFirst(visibleMask, kCount));  // first visible item
 }
 
 void MenuHandler::hide()

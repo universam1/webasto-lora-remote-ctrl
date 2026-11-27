@@ -18,10 +18,21 @@ enum class MenuItem
   ClimateOn,    // Klima an (stored target and duration)
   ClimateOff,   // Klima aus
   QueryStatus,  // Abfrage
-  BlePair,      // BLE koppeln (receiver only)
-  BleClear,     // Bindungen loeschen (receiver only)
+  BlePair,      // BLE koppeln (only while the BLE stack runs)
+  BleClear,     // Bindungen loeschen (only while the BLE stack runs)
+  RangeTest,    // Ping-Pong LoRa range test (sender only)
   Count         // Number of menu items (sentinel)
 };
+
+// Item masks (bit i = MenuItem i). Order and numeric values of the existing items are unchanged.
+constexpr uint16_t kMenuCommonMask = (1u << static_cast<uint8_t>(MenuItem::Start)) |
+                                     (1u << static_cast<uint8_t>(MenuItem::Stop)) |
+                                     (1u << static_cast<uint8_t>(MenuItem::ClimateOn)) |
+                                     (1u << static_cast<uint8_t>(MenuItem::ClimateOff)) |
+                                     (1u << static_cast<uint8_t>(MenuItem::QueryStatus));
+constexpr uint16_t kMenuBleMask = (1u << static_cast<uint8_t>(MenuItem::BlePair)) |
+                                  (1u << static_cast<uint8_t>(MenuItem::BleClear));
+constexpr uint16_t kMenuRangeMask = 1u << static_cast<uint8_t>(MenuItem::RangeTest);
 
 class MenuHandler
 {
@@ -37,16 +48,33 @@ class MenuHandler
   // Get current menu state
   MenuState getState() const { return currentState; }
 
-  // Number of items the menu cycles through (default: all, MenuItem::Count).
-  // The sender has no BLE items yet and limits the menu to the first five.
-  // A shrinking count clamps the selection (there is no separate scroll offset: the page is
-  // derived from the selected item).
+  // Items the menu cycles through, as a mask of MenuItem bits (default: all). An item that gets
+  // hidden while selected moves the selection to the first visible item. The page is derived from
+  // the position of the selected item among the visible ones (there is no separate scroll offset).
+  void setVisibleMask(uint16_t mask)
+  {
+    visibleMask = rt::menuMaskSanitize(mask, kCount);
+    selectedItem = static_cast<MenuItem>(rt::menuMaskFix(visibleMask, kCount, static_cast<uint8_t>(selectedItem)));
+  }
+  // The first n items (compatibility).
   void setItemCount(uint8_t n)
   {
-    itemCount = rt::menuClampCount(n, static_cast<uint8_t>(MenuItem::Count));
-    selectedItem = static_cast<MenuItem>(rt::menuClampSelected(static_cast<uint8_t>(selectedItem), itemCount));
+    const uint8_t c = rt::menuClampCount(n, kCount);
+    setVisibleMask(static_cast<uint16_t>((1u << c) - 1u));
   }
-  uint8_t getItemCount() const { return itemCount; }
+
+  // Number of visible items, the item at a position (0 based) and the position of the selection.
+  uint8_t getItemCount() const { return rt::menuMaskCount(visibleMask, kCount); }
+  MenuItem getItemAt(uint8_t pos) const
+  {
+    const uint8_t i = rt::menuMaskItemAt(visibleMask, kCount, pos);
+    return static_cast<MenuItem>(i == 0xFF ? 0 : i);
+  }
+  uint8_t getSelectedPos() const
+  {
+    const uint8_t p = rt::menuMaskPosOf(visibleMask, kCount, static_cast<uint8_t>(selectedItem));
+    return p == 0xFF ? 0 : p;
+  }
 
   // Get currently selected menu item
   MenuItem getSelectedItem() const { return selectedItem; }
@@ -83,7 +111,8 @@ class MenuHandler
   bool buttonWasPressed = false;
   uint32_t menuShowTimeMs = 0;
   bool itemActivated = false;
-  uint8_t itemCount = static_cast<uint8_t>(MenuItem::Count);
+  static constexpr uint8_t kCount = static_cast<uint8_t>(MenuItem::Count);
+  uint16_t visibleMask = static_cast<uint16_t>((1u << kCount) - 1u);
   bool longPressTriggered = false;  // Prevents re-triggering on same press
 
   // Constants for button handling
@@ -114,6 +143,8 @@ inline const char *menuItemToStr(MenuItem item)
     return "BLE koppeln";
   case MenuItem::BleClear:
     return "Bindungen loeschen";
+  case MenuItem::RangeTest:
+    return "Ping-Pong";
   default:
     return "-";
   }

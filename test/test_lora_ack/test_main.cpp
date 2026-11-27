@@ -85,6 +85,36 @@ void test_menu_clamp() {
   TEST_ASSERT_EQUAL(2, rt::menuClampSelected(2, 5));
 }
 
+// Item numbers as in MenuItem: 0 Start .. 4 QueryStatus, 5 BlePair, 6 BleClear, 7 RangeTest.
+void test_menu_mask() {
+  const uint8_t kMax = 8;
+  const uint16_t common = 0x1F, ble = 0x60, range = 0x80;
+  // Sender without BLE: five common items plus the range test, in item order.
+  const uint16_t m = common | range;
+  TEST_ASSERT_EQUAL(6, rt::menuMaskCount(m, kMax));
+  TEST_ASSERT_EQUAL(7, rt::menuMaskItemAt(m, kMax, 5));  // last visible = RangeTest
+  TEST_ASSERT_EQUAL(0xFF, rt::menuMaskItemAt(m, kMax, 6));
+  TEST_ASSERT_EQUAL(5, rt::menuMaskPosOf(m, kMax, 7));
+  TEST_ASSERT_EQUAL(0xFF, rt::menuMaskPosOf(m, kMax, 5));  // BLE hidden
+  // The next press wraps around over the hidden BLE items.
+  TEST_ASSERT_EQUAL(7, rt::menuMaskNext(m, kMax, 4));
+  TEST_ASSERT_EQUAL(0, rt::menuMaskNext(m, kMax, 7));
+  // Receiver: common + BLE, no range test.
+  const uint16_t r = common | ble;
+  TEST_ASSERT_EQUAL(7, rt::menuMaskCount(r, kMax));
+  TEST_ASSERT_EQUAL(0, rt::menuMaskNext(r, kMax, 6));
+  TEST_ASSERT_EQUAL(0xFF, rt::menuMaskPosOf(r, kMax, 7));
+  // An item that becomes hidden while it is selected falls back to the first visible one.
+  TEST_ASSERT_EQUAL(0, rt::menuMaskFix(common, kMax, 6));
+  TEST_ASSERT_EQUAL(3, rt::menuMaskFix(common, kMax, 3));
+  // A mask without any valid bit shows everything; bits above the item count are ignored.
+  TEST_ASSERT_EQUAL(8, rt::menuMaskCount(0, kMax));
+  TEST_ASSERT_EQUAL(8, rt::menuMaskCount(0xFF00, kMax));
+  TEST_ASSERT_EQUAL(1, rt::menuMaskCount(0xFF01, kMax));
+  // A hidden item as the start of "next" gives the first visible item.
+  TEST_ASSERT_EQUAL(0, rt::menuMaskNext(common, kMax, 6));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_new_pending_done_cycle);
@@ -94,5 +124,6 @@ int main() {
   RUN_TEST(test_timeout_answers_failed_once);
   RUN_TEST(test_finish_without_pending);
   RUN_TEST(test_menu_clamp);
+  RUN_TEST(test_menu_mask);
   return UNITY_END();
 }

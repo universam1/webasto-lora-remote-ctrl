@@ -30,12 +30,14 @@ void LORA_ISR_ATTR LoRaLink::onTxDoneISR() {
   txDoneFlag = true;
 }
 
-// Payload size by message type for the receive length check (Command 4, Status 19, Ack 0).
+// Payload size by message type for the receive length check (Command 4, Status 19, Ack 0, Ping 0, Pong 4).
 static int payloadSizeForType(uint8_t type) {
   switch (static_cast<proto::MsgType>(type)) {
     case proto::MsgType::Command: return sizeof(proto::CommandPayload);
     case proto::MsgType::Status:  return sizeof(proto::StatusPayload);
     case proto::MsgType::Ack:     return 0;
+    case proto::MsgType::Ping:    return 0;
+    case proto::MsgType::Pong:    return sizeof(proto::PongPayload);
     default:                      return -1;
   }
 }
@@ -287,7 +289,7 @@ bool LoRaLink::recv(proto::Packet& pkt, int& rssi, float& snr) {
   }
   
   // Wire format (v5): header (6) + payload (by type) + crc (2). Accept only the exact length for the type:
-  // command 12 B, status 27 B, ack 8 B. Everything else is dropped.
+  // command 12 B, status 27 B, ack 8 B, ping 8 B, pong 12 B. Everything else is dropped.
   const int kHeaderSize = sizeof(proto::PacketHeader);
   const int kCrcSize = sizeof(uint16_t);
   if (pktSize < kHeaderSize + kCrcSize) {

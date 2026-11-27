@@ -175,6 +175,28 @@ Open Serial Monitor at `115200` and type:
 
 `start` uses the last `run <minutes>` value (defaults to `DEFAULT_RUN_MINUTES`).
 
+### Range test (ping-pong)
+
+Measures the LoRa range without touching the heater. Start it with the menu item **Ping-Pong**
+(long press again to stop) or on the serial console with `ping [n]` (`n` pings, none = until
+`pingstop`).
+
+- The sender transmits a ping (8 bytes on air). The receiver answers at once with a pong that
+  carries the RSSI and SNR it measured for that ping, so one test gives **both directions**:
+  uplink (receiver heard the sender) and downlink (sender heard the receiver), plus the round
+  trip time.
+- The interval follows from the radio profile: at least 11 times the longest airtime (10 % duty
+  cycle in the 433 MHz band), and long enough for the pong to arrive. At SF11 that is about 7.5 s
+  per ping.
+- The OLED shows pings sent, answered and lost, the loss in percent, and the last RSSI/SNR of
+  both directions. The serial log has one line per ping, and `pingstop` (or the menu) prints min,
+  average and max of RSSI, SNR and round trip time.
+- A ping does not open the receiver's sender-active window and never reaches the heater. A heater
+  command ends a running test.
+- The receiver needs the same firmware version (new message types Ping and Pong); the receiver
+  menu has no entry for it.
+- Pings and pongs are encrypted like all other packets.
+
 ## Receiver status polling
 
 Receiver polls W‑BUS operating state every ~2 seconds (command `0x50` index `0x07`) and sends status back over LoRa.
