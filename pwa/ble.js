@@ -17,7 +17,7 @@
     this.cb = cb || {};
     this.device = null; this.chr = null; this.info = null;
     this.userDisconnect = false; this.attempt = 0; this.timer = null;
-    this.role = 'receiver'; this._watch = null; this._opening = false; this.needsResume = false;
+    this._watch = null; this._opening = false; this.needsResume = false;
     this.cmdId = 0; this.pending = null;
     var self = this;
     this._onStatus = function (ev) { self._handleStatus(ev.target.value); };
@@ -59,7 +59,6 @@
   function canList() { return supported() && typeof root.navigator.bluetooth.getDevices === 'function'; }
 
   Ble.prototype._search = function (kind) { if (this.cb.onSearch) this.cb.onSearch(kind); };
-  Ble.prototype._wantRole = function () { return this.role === 'sender' ? 'sender' : 'receiver'; };
 
   Ble.prototype._attach = function (dev) {
     if (this.device && this.device !== dev) this.device.removeEventListener('gattserverdisconnected', this._onDisc);
@@ -68,7 +67,8 @@
     dev.addEventListener('gattserverdisconnected', this._onDisc);
   };
 
-  // First pairing. Must be called from a user gesture. The chooser lists only devices of the chosen role.
+  // First pairing or switching the unit. Must be called from a user gesture. The chooser lists every unit with
+  // the service; the names (Webasto-RX-XXXX / Webasto-TX-XXXX) tell receiver and sender apart.
   Ble.prototype.connect = async function () {
     if (!supported()) throw new Error('Web Bluetooth nicht verfügbar');
     this.cancelSearch(); this.userDisconnect = false; this.attempt = 0; clearTimeout(this.timer);
@@ -76,7 +76,7 @@
     var dev;
     try {
       dev = await root.navigator.bluetooth.requestDevice({
-        filters: [{ services: [UUID.service], namePrefix: root.Util.ROLE_PREFIX[this._wantRole()] }],
+        filters: [{ services: [UUID.service] }],
         optionalServices: [UUID.service]
       });
     } catch (e) {
@@ -95,7 +95,7 @@
     if (!visible()) { this.needsResume = true; return 'timeout'; }
     var list;
     try { list = await root.navigator.bluetooth.getDevices(); } catch (e) { return 'unsupported'; }
-    var dev = root.Util.pickDevice(list, { id: load('bleDeviceId'), name: load('bleDeviceName'), role: this._wantRole() });
+    var dev = root.Util.pickDevice(list, { id: load('bleDeviceId'), name: load('bleDeviceName') });
     if (!dev) return 'none';
     this.userDisconnect = false; this.attempt = 0; clearTimeout(this.timer);
     return this._watchAndOpen(dev);
@@ -105,13 +105,8 @@
   Ble.prototype.resume = function () {
     if (this.userDisconnect || this.isConnected() || this._watch || this._opening || !visible()) return Promise.resolve('busy');
     this.needsResume = false; clearTimeout(this.timer);
-    if (this.device && this._wantRole() === this._deviceRole()) return this._watchAndOpen(this.device);
+    if (this.device) return this._watchAndOpen(this.device);
     return this.autoConnect();
-  };
-
-  Ble.prototype._deviceRole = function () {
-    var n = this.device && this.device.name || '';
-    return n.indexOf(root.Util.ROLE_PREFIX.sender) === 0 ? 'sender' : 'receiver';
   };
 
   // Waits for one advertisement of dev (so it is known to be in range), then connects. Never loops.
@@ -172,10 +167,6 @@
         command: await svc.getCharacteristic(UUID.command), result: await svc.getCharacteristic(UUID.result)
       };
       var info = P.parseInfo(await c.info.readValue());
-      if (ROLE_NAME[info.role] !== this._wantRole()) { // never keep a session with the wrong role
-        var e0 = new Error('Falsches Gerät: ' + (this.device.name || '?') + ' ist ein ' + info.roleText + ', erwartet wird ' + (this._wantRole() === 'sender' ? 'Sender' : 'Receiver') + '. Rolle in den Einstellungen prüfen.');
-        e0.code = 'WRONG_ROLE'; throw e0;
-      }
       this.chr = c; this.info = info;
       save('bleDeviceId', this.device.id || ''); save('bleDeviceName', this.device.name || ''); save('bleDeviceRole', ROLE_NAME[info.role] || '');
       if (this.cb.onInfo) this.cb.onInfo(this.info, this.device.name || '');
@@ -190,11 +181,11 @@
       this._state('Verbunden', 'ok');
       return true;
     } catch (e) {
-      if (e && (e.code === 'INCOMPATIBLE' || e.code === 'WRONG_ROLE')) {
-        this.userDisconnect = true; // do not retry against incompatible firmware or the wrong device
+      if (e && e.code === 'INCOMPATIBLE') {
+        this.userDisconnect = true; // do not retry against incompatible firmware
         this.chr = null;
         if (this.cb.onError) this.cb.onError(e.message);
-        this._state(e.code === 'WRONG_ROLE' ? 'Falsches Gerät' : 'Firmware inkompatibel', 'err');
+        this._state('Firmware inkompatibel', 'err');
         try { if (this.device.gatt.connected) this.device.gatt.disconnect(); } catch (x) { /* ignore */ }
         return false;
       }

@@ -190,13 +190,7 @@
   <section class="view" id="view-einstellungen" data-view="einstellungen" aria-label="Einstellungen" hidden>
     <div class="card">
       <h2>Gerät</h2>
-      <label class="field" for="role">Rolle des Geräts
-        <select id="role">
-          <option value="receiver">Receiver (Fahrzeug, direkt)</option>
-          <option value="sender">Sender (Fernbedienung, LoRa)</option>
-        </select>
-      </label>
-      <p class="hint">Die Auswahl legt fest, welche Geräte beim Koppeln und beim automatischen Verbinden infrage kommen (Name Webasto-RX-… oder Webasto-TX-…).</p>
+      <p class="hint">„Verbinden“ zeigt alle Geräte: Webasto-RX-… ist der Receiver im Fahrzeug, Webasto-TX-… der Sender (Fernbedienung, über LoRa). Die PWA verbindet sich später automatisch mit dem zuletzt gewählten Gerät. Zum Wechseln „Trennen“ und erneut „Verbinden“.</p>
     </div>
     <div class="card">
       <h2>Anzeige</h2>

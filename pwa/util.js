@@ -83,24 +83,16 @@
   }
 
   // Device selection for the reconnect without chooser. devices: BluetoothDevice-like {id, name} from getDevices().
-  // saved: {id, name, role: 'receiver'|'sender'}. Picks by stored id, else by the role's name prefix
-  // (and the stored name if several match). Never returns a device of the other role.
+  // saved: {id, name} of the device the user last chose in the chooser. Picks by stored id, else by the stored
+  // name. Without saved data nothing is picked: the user chooses in the chooser, which shows the unique names
+  // Webasto-RX-XXXX (receiver) and Webasto-TX-XXXX (sender).
   var ROLE_PREFIX = { receiver: 'Webasto-RX', sender: 'Webasto-TX' };
-  function startsWith(n, p) { return typeof n === 'string' && n.indexOf(p) === 0; }
   function pickDevice(devices, saved) {
-    if (!devices || !devices.length || !saved) return null;
-    var role = saved.role === 'sender' || saved.role === 'receiver' ? saved.role : null;
-    if (!role) return null;
-    var want = ROLE_PREFIX[role], other = ROLE_PREFIX[role === 'sender' ? 'receiver' : 'sender'], i, d;
-    if (saved.id) for (i = 0; i < devices.length; i++) {
-      d = devices[i];
-      if (d && d.id === saved.id && !startsWith(d.name, other)) return d;
-    }
-    var cand = [];
-    for (i = 0; i < devices.length; i++) if (devices[i] && startsWith(devices[i].name, want)) cand.push(devices[i]);
-    if (!cand.length) return null;
-    if (saved.name) for (i = 0; i < cand.length; i++) if (cand[i].name === saved.name) return cand[i];
-    return cand[0];
+    if (!devices || !devices.length || !saved || (!saved.id && !saved.name)) return null;
+    var i;
+    if (saved.id) for (i = 0; i < devices.length; i++) if (devices[i] && devices[i].id === saved.id) return devices[i];
+    if (saved.name) for (i = 0; i < devices.length; i++) if (devices[i] && devices[i].name === saved.name) return devices[i];
+    return null;
   }
 
   return {

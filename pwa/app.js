@@ -162,7 +162,6 @@
     if (!connected || connKind !== 'ok') recorder.markGap();
     $('btnConnect').hidden = connKind === 'ok' || connKind === 'busy';
     $('btnDisconnect').hidden = !(connKind === 'ok' || connKind === 'busy');
-    $('role').disabled = connKind === 'ok' || connKind === 'busy';
     $('btnRetry').hidden = !(retryable && connKind === 'off');
     $('btnDisconnect').textContent = searching ? 'Abbrechen' : 'Trennen';
     var load = connKind === 'busy' && !lastStatus;
@@ -441,9 +440,6 @@
   }
 
   function bind() {
-    var role = store('role');
-    if (role === 'sender' || role === 'receiver') $('role').value = role;
-    $('role').addEventListener('change', function () { store('role', $('role').value); if (ble) ble.role = $('role').value; });
     $('btnRetry').addEventListener('click', function () { retryable = false; autoConnect(true); });
 
     $('btnConnect').addEventListener('click', function () {
@@ -482,7 +478,6 @@
     applyTheme(); buildClimate(); buildChartUi(); bind(); bindSettings();
     if (!demo && !window.Ble.supported()) { $('unsupported').hidden = false; $('btnConnect').disabled = true; }
     ble = demo ? window.Demo.create(callbacks) : window.Ble.create(callbacks);
-    ble.role = $('role').value;
     showView(location.hash.slice(1), true);
     setConn('Getrennt', 'off');
     if (demo) {
