@@ -131,13 +131,14 @@
 
 #ifndef LORA_TX_POWER_DBM
 // TX power in dBm at the PA_BOOST pin (the TTGO LoRa32 antenna is connected to PA_BOOST), 2..20.
-// Without an explicit value: 20 with LORA_TX_POWER_BOOST, otherwise 17 (the library default).
-// Legal limit in the 433.05..434.79 MHz band: 10 mW ERP = 12.15 dBm EIRP, so 10 dBm with a
-// 0..2 dBi antenna. 20 dBm would be 61..97 mW ERP.
+// Default 10 dBm: with a 0..2 dBi antenna that is 6.1..9.7 mW ERP, inside the legal limit of
+// 10 mW ERP (= 12.15 dBm EIRP) in the 433.05..434.79 MHz band. 20 dBm would be 61..97 mW ERP and is
+// only for the range test environments sender_20dbm / receiver_20dbm (platformio.ini).
+// The old profile LORA_RANGE_LONG still asks for the boost (LORA_TX_POWER_BOOST = 1): 20 dBm.
 #if LORA_TX_POWER_BOOST
 #define LORA_TX_POWER_DBM 20
 #else
-#define LORA_TX_POWER_DBM 17
+#define LORA_TX_POWER_DBM 10
 #endif
 #endif
 
