@@ -1,5 +1,11 @@
 #pragma once
 
+// Local secrets (not in git): WiFi, MQTT, OTA and the BLE passkey. Included for every role,
+// so the sender (no MQTT) also gets BLE_PASSKEY. Optional: without the file the defaults apply.
+#if __has_include("credentials.h")
+#include "credentials.h"
+#endif
+
 // -------------------------
 // Board pinout (TTGO LoRa32-OLED V1.0)
 // -------------------------
@@ -196,7 +202,7 @@
 
 // Sender: resend interval while waiting for ACK (ms)
 #ifndef SENDER_CMD_RETRY_INTERVAL_MS
-#define SENDER_CMD_RETRY_INTERVAL_MS 1300  // Increased from 1s to allow RX windows
+#define SENDER_CMD_RETRY_INTERVAL_MS 1300  // lower bound; the sender derives a longer one from airtime (lora_airtime.h)
 #endif
 
 // Receiver: W-BUS polling interval when heater is running (ms)

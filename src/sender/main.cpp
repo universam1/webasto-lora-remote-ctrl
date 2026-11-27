@@ -8,6 +8,7 @@
 #include "encryption.h"
 #include "menu_handler.h"
 #include "status_codec.h"
+#include "lora_airtime.h"
 #include "sender_ble_map.h"
 #if defined(ENABLE_BLE) && ENABLE_BLE
 #include "sender_ble.h"
@@ -197,7 +198,10 @@ static void serviceJob(uint32_t now)
   if (!jobBusy())
     return;
 
-  if ((uint32_t)(now - gJob.startMs) >= kSenderJobTimeoutMs)
+  // `now` is taken at the top of the loop; a job started later in the same pass (serial, BLE,
+  // menu) has startMs > now. Signed difference so that case counts as "just started", not as
+  // a wrapped 49-day age that failed the job at once with Timeout.
+  if ((int32_t)(now - gJob.startMs) >= (int32_t)kSenderJobTimeoutMs)
   {
     jobFinish(false, kResTimeout, "Timeout");
     return;
@@ -215,9 +219,18 @@ static void serviceJob(uint32_t now)
       gJob.txCount++;
       if (gJob.txCount == 1)
         jobReport(kStageSent, 0);
-      // Retry interval with +-25 % jitter to avoid colliding with receiver status packets.
-      int32_t jitter = ((int32_t)random(51) - 25) * (int32_t)SENDER_CMD_RETRY_INTERVAL_MS / 100;
-      gJob.nextTxMs = now + (uint32_t)((int32_t)SENDER_CMD_RETRY_INTERVAL_MS + jitter);
+      // Retry interval: own airtime + the receiver's reply airtime + margin, so the reply is not
+      // lost while we transmit again (lora_airtime.h). Jitter 0..+25 % only lengthens it.
+      static const uint32_t kRetryMs = []() {
+        const uint32_t cmdAir = lora::airtimeUs(sizeof(proto::PacketHeader) + sizeof(proto::CommandPayload) + 2,
+                                                LORA_SF, (uint32_t)LORA_BW, LORA_CR);
+        const uint32_t replyAir = lora::airtimeUs(sizeof(proto::PacketHeader) + sizeof(proto::StatusPayload) + 2,
+                                                  LORA_SF, (uint32_t)LORA_BW, LORA_CR);
+        const uint32_t derived = lora::commandRetryMs(cmdAir, replyAir);
+        return derived > (uint32_t)SENDER_CMD_RETRY_INTERVAL_MS ? derived : (uint32_t)SENDER_CMD_RETRY_INTERVAL_MS;
+      }();
+      const uint32_t jitter = (uint32_t)random(26) * kRetryMs / 100;
+      gJob.nextTxMs = now + kRetryMs + jitter;
       gJob.state = JobState::WaitAck;
     }
     else
@@ -729,7 +742,8 @@ static void senderLoopOnce()
   menu.update();
   if (menu.getState() == MenuState::Visible || digitalRead(MENU_BUTTON_PIN) == LOW)
     senderNoteUserActivity();
-  if (gUserActive && (now - gUserActivityMs) > kSenderUserActiveMs)
+  // signed: gUserActivityMs may be newer than `now` (set by millis() earlier in this pass)
+  if (gUserActive && (int32_t)(now - gUserActivityMs) > (int32_t)kSenderUserActiveMs)
     gUserActive = false;
 
   MenuItem activatedItem;
